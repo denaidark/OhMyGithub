@@ -110,7 +110,7 @@ an older or experimental commit without changing the source repository.
 Set the repository and commit variables first:
 
 ```sh
-repo=AgentsLoop/OhMyGithub-rc
+repo=denaidark/OhMyGithub-rc
 commit=<full-commit-sha>
 branch=rc-<short-commit-sha>
 ```
@@ -251,7 +251,7 @@ endpoints as the GitHub Actions web UI:
 
 ```sh
 python3 scripts/gh-run-watch-logs.py <run-id> \
-  --repo AgentsLoop/OhMyGithub --internal-job-id <web-job-id> --exit-status
+  --repo denaidark/OhMyGithub --internal-job-id <web-job-id> --exit-status
 ```
 
 The script authenticates with `gh auth token`. GitHub's web log endpoints are

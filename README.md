@@ -4,9 +4,9 @@
 
 ### 🚀 One Prompt In. A Full Game or App Out. 🚀
 
-[![Status](https://img.shields.io/badge/status-🔥%20works-brightgreen?style=for-the-badge)](https://github.com/AgentsLoop/OhMyGithub/actions)
-[![GitHub Issues](https://img.shields.io/github/issues/AgentsLoop/OhMyGithub?style=for-the-badge&logo=github)](https://github.com/AgentsLoop/OhMyGithub/issues)
-[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-automated-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/AgentsLoop/OhMyGithub/actions)
+[![Status](https://img.shields.io/badge/status-🔥%20works-brightgreen?style=for-the-badge)](https://github.com/denaidark/OhMyGithub/actions)
+[![GitHub Issues](https://img.shields.io/github/issues/denaidark/OhMyGithub?style=for-the-badge&logo=github)](https://github.com/denaidark/OhMyGithub/issues)
+[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-automated-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/denaidark/OhMyGithub/actions)
 [![OpenCode](https://img.shields.io/badge/powered%20by-OpenCode-111111?style=for-the-badge)](https://opencode.ai/)
 
 ```text
@@ -67,7 +67,7 @@ before the issue body is sent to OpenCode:
 
 ```sh
 gh issue create \
-  --repo AgentsLoop/OhMyGithub \
+  --repo denaidark/OhMyGithub \
   --title "Custom branch smoke test branch: codex/omgithub-site" \
   --body "Build a tiny browser page." \
   --label Goal \
@@ -220,7 +220,7 @@ The old workflow was: idea → tickets → scaffolding → setup → implementat
 
 The OMG workflow is: **idea → issue → playable project.**
 
-If you believe software should start with a sentence instead of a sprint plan, [⭐ star the repository](https://github.com/AgentsLoop/OhMyGithub) and try it.
+If you believe software should start with a sentence instead of a sprint plan, [⭐ star the repository](https://github.com/denaidark/OhMyGithub) and try it.
 
 <div align="center">
 

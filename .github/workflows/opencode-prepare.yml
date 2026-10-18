@@ -91,7 +91,7 @@ jobs:
       - name: Checkout trusted preparation code
         uses: actions/checkout@v6
         with:
-          repository: AgentsLoop/OhMyGithub
+          repository: denaidark/OhMyGithub
           ref: ${{ inputs.runtime_ref }}
           persist-credentials: false
           sparse-checkout: |

@@ -53,7 +53,7 @@ dispatch `opencode.yml` at that branch and stop. Run preparation and OpenCode
 from the selected branch workflow. Use the central workflow revision pinned by
 that branch's caller.
 
-Read the [Oh My Github App documentation](https://github.com/AgentsLoop/omsite/blob/main/wiki/oh-my-github-app.md) for
+Read the [Oh My Github App documentation](https://github.com/denaidark/omsite/blob/main/wiki/oh-my-github-app.md) for
 App ownership, installation scope, permissions, events, and webhook details.
 
 An issue labeled `omo` additionally installs and configures the OpenCode Ultimate
@@ -91,7 +91,7 @@ project directory, discovers root `index.html` or `dist/index.html`, and creates
 the store page and playable deployment. Keep the full
 commit-SHA URL working for compatibility. There is no separate publishing
 credential or upload step.
-Read [OmGithub publishing](https://github.com/AgentsLoop/omsite/blob/main/wiki/omgithub.md).
+Read [OmGithub publishing](https://github.com/denaidark/omsite/blob/main/wiki/omgithub.md).
 
 The OmGithub issue workspace polls issue comments every eight seconds. Its
 header contains the four numbered workflow stages plus the currently executing
@@ -143,7 +143,7 @@ issue text is passed directly as the objective before it is passed to the custom
 command, and later human messages steer the running goal instead of
 pausing it.
 
-Before starting OpenCode, the workflow checks out `agents-dev/skills` into
+Before starting OpenCode, the workflow checks out `denaidark/skills` into
 `$PROJECT_DIR/.agents`. OpenCode discovers project skills from
 `$PROJECT_DIR/.agents/skills/**/SKILL.md`.
 The workflow excludes this nested skills checkout through `.git/info/exclude`

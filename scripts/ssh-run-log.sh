@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo="AgentsLoop/OhMyGithub"
+repo="denaidark/OhMyGithub"
 run_id=""
 key="${HOME}/.ssh/aiplay-agentsweb"
 broker_url="${BROKER_REGISTRY_URL:-https://broker.agentsweb.space/api/registrations}"

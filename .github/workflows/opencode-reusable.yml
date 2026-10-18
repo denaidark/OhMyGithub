@@ -170,7 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           /usr/bin/time -p git init "$RUNTIME_DIR"
-          /usr/bin/time -p git -C "$RUNTIME_DIR" remote add origin https://github.com/AgentsLoop/OhMyGithub.git
+          /usr/bin/time -p git -C "$RUNTIME_DIR" remote add origin https://github.com/denaidark/OhMyGithub.git
           /usr/bin/time -p git -C "$RUNTIME_DIR" fetch --depth=1 origin "$RUNTIME_REF"
           /usr/bin/time -p git -C "$RUNTIME_DIR" checkout --detach FETCH_HEAD
           [[ "$(git -C "$RUNTIME_DIR" rev-parse HEAD)" == "$RUNTIME_REF" ]]
@@ -206,7 +206,7 @@ jobs:
         run: |
           set -euo pipefail
           /usr/bin/time -p git clone --depth=1 --filter=blob:none --sparse \
-            https://github.com/agents-dev/agent-workspace.git "$AGENTSWEB_DIR"
+            https://github.com/denaidark/agent-workspace.git "$AGENTSWEB_DIR"
           /usr/bin/time -p git -C "$AGENTSWEB_DIR" sparse-checkout set lolgames_tunnel
           /usr/bin/time -p test -f "$AGENTSWEB_DIR/lolgames_tunnel/client.py"
 
@@ -249,7 +249,7 @@ jobs:
         if: env.TEST_REQUEST != 'true'
         uses: actions/checkout@v6
         with:
-          repository: agents-dev/skills
+          repository: denaidark/skills
           path: ${{ env.PROJECT_PATH }}/.agents
           fetch-depth: 1
           persist-credentials: false

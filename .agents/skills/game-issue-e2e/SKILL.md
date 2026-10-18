@@ -72,7 +72,7 @@ the `AgentsLoop/PlayGround` fallback when `#main` is present. Otherwise, on
 repository. Never infer the default `main` repository from `git remote`.
 
 If the user mentions another local skill, verify it exists in
-`https://github.com/agents-dev/skills/` before selecting it. If it is absent,
+`https://github.com/denaidark/skills/` before selecting it. If it is absent,
 push it first.
 
 ## Procedure

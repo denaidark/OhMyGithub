@@ -3,13 +3,13 @@
 1. Find the active run for the issue:
 
    ```sh
-   gh run list --repo AgentsLoop/OhMyGithub --workflow opencode.yml --status in_progress
+   gh run list --repo denaidark/OhMyGithub --workflow opencode.yml --status in_progress
    ```
 
 2. Discover the worker SSH host and port:
 
    ```sh
-   bash scripts/ssh-run-log.sh <run-id> --repo AgentsLoop/OhMyGithub
+   bash scripts/ssh-run-log.sh <run-id> --repo denaidark/OhMyGithub
    ```
 
 3. Connect using the host, port, and key printed by the helper:
