@@ -1,0 +1,135 @@
+name: Prepare OpenCode issue
+
+on:
+  workflow_call:
+    inputs:
+      runtime_ref:
+        description: Approved central runtime commit matching this reusable workflow
+        required: true
+        type: string
+    outputs:
+      approved:
+        value: ${{ jobs.prepare.outputs.approved }}
+      issue_number:
+        value: ${{ jobs.prepare.outputs.issue_number }}
+      request:
+        value: ${{ jobs.prepare.outputs.request }}
+      issue_title:
+        value: ${{ jobs.prepare.outputs.issue_title }}
+      labels_json:
+        value: ${{ jobs.prepare.outputs.labels_json }}
+      sender:
+        value: ${{ jobs.prepare.outputs.sender }}
+      target_ref:
+        value: ${{ jobs.prepare.outputs.target_ref }}
+      target_sha:
+        value: ${{ jobs.prepare.outputs.target_sha }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
+      actions: write
+    outputs:
+      approved: ${{ steps.prepare.outputs.approved }}
+      issue_number: ${{ steps.prepare.outputs.issue_number }}
+      request: ${{ steps.prepare.outputs.request }}
+      issue_title: ${{ steps.prepare.outputs.issue_title }}
+      labels_json: ${{ steps.prepare.outputs.labels_json }}
+      sender: ${{ steps.prepare.outputs.sender }}
+      target_ref: ${{ steps.prepare.outputs.target_ref }}
+      target_sha: ${{ steps.prepare.outputs.target_sha }}
+    steps:
+      - name: Authenticate status callbacks
+        continue-on-error: true
+        shell: bash
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.inputs.issue_number }}
+          OMGITHUB_ORIGIN: ${{ vars.OMGITHUB_ORIGIN || 'https://omgithub.com' }}
+        run: |
+          /usr/bin/time -p node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          const env = process.env;
+          const origin = env.OMGITHUB_ORIGIN.replace(/\/$/, '');
+          const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
+          url.searchParams.set('audience', origin);
+          async function json(url, options) {
+            const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+            if (!response.ok) throw new Error(`Callback authentication HTTP ${response.status}`);
+            return response.json();
+          }
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const identity = await json(url, { headers: { authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
+              const { token } = await json(`${origin}/api/github/${env.GITHUB_REPOSITORY}/issues/${env.ISSUE_NUMBER}/callback-token`, {
+                method: 'POST', headers: { authorization: `Bearer ${identity.value}`, 'content-type': 'application/json' },
+                body: JSON.stringify({ run: env.GITHUB_RUN_ID, attempt: Number(env.GITHUB_RUN_ATTEMPT) })
+              });
+              console.log(`::add-mask::${token}`);
+              appendFileSync(env.GITHUB_ENV, `OMGITHUB_CALLBACK_TOKEN=${token}\n`);
+              break;
+            } catch (error) {
+              if (attempt === 2) throw error;
+              await new Promise(resolve => setTimeout(resolve, 2000 * 2 ** attempt));
+            }
+          }
+          NODE
+      - name: Register preparation
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.inputs.issue_number }}
+          OMGITHUB_ORIGIN: ${{ vars.OMGITHUB_ORIGIN || 'https://omgithub.com' }}
+        run: |
+          /usr/bin/time -p curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
+            -H "Authorization: Bearer $OMGITHUB_CALLBACK_TOKEN" -H 'Content-Type: application/json' \
+            --data "{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":1,\"state\":\"starting\",\"phase\":\"initializing\"}" \
+            "$OMGITHUB_ORIGIN/api/github/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/run"
+      - name: Checkout trusted preparation code
+        uses: actions/checkout@v6
+        with:
+          repository: AgentsLoop/OhMyGithub
+          ref: ${{ inputs.runtime_ref }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/opencode-prepare.mjs
+            scripts/issue-request.mjs
+          sparse-checkout-cone-mode: false
+      - name: Validate and claim issue request
+        id: prepare
+        env:
+          OPENCODE_ACCESS: ${{ vars.OPENCODE_ACCESS || 'writers' }}
+          GH_TOKEN: ${{ github.token }}
+        run: /usr/bin/time -p node scripts/opencode-prepare.mjs
+
+      - name: Report branch handoff
+        if: steps.prepare.outputs.redispatched == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.inputs.issue_number }}
+          OMGITHUB_ORIGIN: ${{ vars.OMGITHUB_ORIGIN || 'https://omgithub.com' }}
+        run: |
+          sequence=$(/usr/bin/time -p node -p 'Date.now()')
+          /usr/bin/time -p curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
+            -H "Authorization: Bearer $OMGITHUB_CALLBACK_TOKEN" -H 'Content-Type: application/json' \
+            --data "{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":$sequence,\"state\":\"starting\",\"phase\":\"queued\"}" \
+            "$OMGITHUB_ORIGIN/api/github/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/run"
+
+      - name: Report preparation failure
+        if: ${{ always() && (failure() || cancelled()) }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.inputs.issue_number }}
+          OMGITHUB_ORIGIN: ${{ vars.OMGITHUB_ORIGIN || 'https://omgithub.com' }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          sequence=$(/usr/bin/time -p node -p 'Date.now()')
+          /usr/bin/time -p curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
+            -H "Authorization: Bearer $OMGITHUB_CALLBACK_TOKEN" -H 'Content-Type: application/json' \
+            --data "{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":$sequence,\"state\":\"ended\",\"phase\":\"initializing\",\"outcome\":\"$OUTCOME\",\"reason\":\"Workflow preparation failed. Check build details.\"}" \
+            "$OMGITHUB_ORIGIN/api/github/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/run"

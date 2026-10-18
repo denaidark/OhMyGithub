@@ -1,0 +1,35 @@
+name: Remix snapshot smoke
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: Public source repository
+        required: true
+        default: Kevin-Liu-01/Claude-of-Tanks
+        type: string
+      source_commit:
+        description: Immutable source commit
+        required: true
+        default: b663dd534d8319476e5b2c0469350d886de16e34
+        type: string
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test snapshot contracts
+        run: /usr/bin/time -p node --test scripts/remix-snapshot.test.mjs
+      - name: Import selected snapshot into an isolated local repository
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: /usr/bin/time -p node scripts/remix-snapshot-smoke.mjs

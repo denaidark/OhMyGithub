@@ -1,0 +1,48 @@
+name: OpenCode
+run-name: "OpenCode #${{ github.event.issue.number || inputs.issue_number }}${{ github.event.issue.title && format(' — {0}', github.event.issue.title) || '' }}"
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Existing issue to run
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: opencode-issue-${{ github.repository }}-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'OpenCode')
+    uses: ./.github/workflows/opencode-prepare.yml
+    with:
+      runtime_ref: ${{ github.workflow_sha }}
+  opencode:
+    needs: prepare
+    if: needs.prepare.outputs.approved == 'true'
+    uses: ./.github/workflows/opencode-reusable.yml
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
+      actions: read
+    with:
+      runtime_ref: ${{ github.workflow_sha }}
+      issue_number: ${{ needs.prepare.outputs.issue_number }}
+      request: ${{ needs.prepare.outputs.request }}
+      issue_title: ${{ needs.prepare.outputs.issue_title }}
+      labels_json: ${{ needs.prepare.outputs.labels_json }}
+      sender: ${{ needs.prepare.outputs.sender }}
+      target_ref: ${{ needs.prepare.outputs.target_ref }}
+      target_sha: ${{ needs.prepare.outputs.target_sha }}
+    secrets: inherit
