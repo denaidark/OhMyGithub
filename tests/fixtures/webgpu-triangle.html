@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>WebGPU triangle</title>
+<style>body{background:#18202c;color:white;font:18px sans-serif}canvas{border:2px solid #8594a8}</style>
+<h1>WebGPU triangle</h1><canvas id="wgpu" width="640" height="480"></canvas><pre id="status">Starting</pre>
+<script type="module">
+window.gpu = navigator.gpu;
+window.__scene = { webgpu: { rendered: false } };
+try {
+  let adapter, device;
+  for (let attempt=0; attempt<3; attempt++) {
+    adapter = await window.gpu.requestAdapter();
+    if (!adapter) throw new Error('No WebGPU adapter');
+    try { device = await adapter.requestDevice(); break; }
+    catch (error) { if (attempt === 2) throw error; }
+  }
+  device.pushErrorScope('validation');
+  const context = document.querySelector('canvas').getContext('webgpu');
+  const format = window.gpu.getPreferredCanvasFormat();
+  context.configure({device, format, alphaMode:'opaque'});
+  const module = device.createShaderModule({code:`
+    @vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f {
+      var p=array<vec2f,3>(vec2f(0,0.75),vec2f(-0.75,-0.75),vec2f(0.75,-0.75));
+      return vec4f(p[i],0,1);
+    }
+    @fragment fn fs()->@location(0) vec4f { return vec4f(0.1,0.9,0.35,1); }
+  `});
+  const pipeline = device.createRenderPipeline({layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format}]},primitive:{topology:'triangle-list'}});
+  function draw() {
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:{r:0.02,g:0.03,b:0.06,a:1},loadOp:'clear',storeOp:'store'}]});
+    pass.setPipeline(pipeline); pass.draw(3); pass.end(); device.queue.submit([encoder.finish()]);
+  }
+  draw(); await device.queue.onSubmittedWorkDone();
+  const error = await device.popErrorScope(); if(error) throw new Error(error.message);
+  window.__scene.webgpu = {rendered:true, vendor:adapter.info.vendor, description:adapter.info.description, isFallbackAdapter:adapter.info.isFallbackAdapter};
+  document.querySelector('#status').textContent=JSON.stringify(window.__scene,null,2);
+  function frame(){draw(); requestAnimationFrame(frame);} requestAnimationFrame(frame);
+} catch(e) { document.querySelector('#status').textContent=e.message; throw e; }
+</script>

@@ -1,0 +1,5 @@
+[
+  {"issue":{"title":"Game branch: text","body":"Build it"},"targetRef":"main","title":"Game branch: text","branchSpecified":false},
+  {"issue":{"title":"Game","body":"Build it\n\n<!-- omgithub-request:v1 {\"branch\":\"feature/game\"} -->"},"targetRef":"feature/game","title":"Game","branchSpecified":true},
+  {"issue":{"title":"Game","body":"<!-- omgithub-request:v1 {\"branch\":\"../bad\"} -->"},"error":true}
+]
