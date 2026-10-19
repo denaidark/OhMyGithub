@@ -160,7 +160,7 @@ Omit the model label when the workflow default is selected. Default GitHub label
 the triggering issue is marked `in progress`, `validating`, `complete`, or
 `failed` as the job advances.
 For difficult game requests, the `game-issue-e2e` skill selects the synchronized
-`model/opencode/muse-spark-1.3-contributor-free` label; if that label is
+`model/opencode/deepseek-v4.1-flash-free` label; if that label is
 unavailable, the skill records that it used the workflow default instead.
 
 The workflow reads the repository variable `PROJECT_DIR` as a repository-relative
