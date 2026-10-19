@@ -831,7 +831,7 @@ jobs:
             }
             // Free OpenCode models get retired (the API then answers "ModelDeprecated" and
             // OpenCode reports "Unexpected server error"). Pick a live default from the catalog.
-            const preferred = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'opencode/mimo-v2.6-flash-free'];
+            const preferred = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle'];
             let live = null;
             try {
               const catalog = await (await fetch('https://models.opencode.ai/api.json', { signal: AbortSignal.timeout(15000) })).json();
