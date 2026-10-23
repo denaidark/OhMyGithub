@@ -91,5 +91,31 @@ test('hold failed debug workers for 30 minutes and successful workers for five h
   assert.match(hold, /steps\.opencode_web\.outcome == 'success'/);
   assert.match(hold, /env\.TEST_REQUEST != 'true' && env\.SSH_ONLY_REQUEST != 'true'/);
   assert.match(hold, /HOLD_SECONDS: \$\{\{ job\.status == 'failure' && '1800' \|\| '18000' \}\}/);
-  assert.match(hold, /run: \/usr\/bin\/time -p sleep "\$HOLD_SECONDS"/);
+  assert.match(hold, /HOLD_DEADLINE_SECONDS: '21000'/);
+  assert.match(hold, /\/usr\/bin\/time -p sleep "\$hold"/);
+});
+
+test('job ends before the GitHub-hosted 6-hour limit', () => {
+  const job = workflow.split('\n  opencode:\n')[1].split('\n    steps:\n')[0];
+  assert.match(job, /\n    timeout-minutes: 355\n/);
+  const firstStep = workflow.split('\n    steps:\n')[1].split('      - name:')[1];
+  assert.match(firstStep, /^ Record job start time/);
+  assert.match(firstStep, /JOB_STARTED_AT=\$\(date \+%s\)/);
+  const hold = workflow.split('      - name: Keep temporary access available\n')[1].split('      - name:')[0];
+  const script = hold.split('        run: |\n')[1].split('\n').map(l => l.replace(/^          /, '')).join('\n');
+  const run = (started, holdSeconds) => execFileSync('bash', ['-c', script.replace('/usr/bin/time -p sleep "$hold"', 'echo "$hold"')], {
+    env: { ...process.env, JOB_STARTED_AT: String(started), HOLD_SECONDS: String(holdSeconds), HOLD_DEADLINE_SECONDS: '21000' }, encoding: 'utf8' }).trim();
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(Number(run(now - 600, 18000)) <= 18000, true);
+  const capped = Number(run(now - 8100, 18000));
+  assert.ok(capped <= 12900 && capped >= 12890, String(capped));
+  assert.match(run(now - 21600, 18000), /No time left/);
+});
+
+test('successful real and test builds are labeled complete', () => {
+  const block = workflow.split('      - name: Mark issue complete\n')[1].split('      - name:')[0];
+  assert.match(block, /if: success\(\) && env\.SSH_ONLY_REQUEST != 'true'\n/);
+  assert.doesNotMatch(block, /TEST_REQUEST/);
+  assert.match(block, /name: 'in progress'/);
+  assert.match(block, /labels: \['complete'\]/);
 });

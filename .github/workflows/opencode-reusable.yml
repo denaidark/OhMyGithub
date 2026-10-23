@@ -47,6 +47,8 @@ jobs:
   opencode:
     # Ubuntu is the default; the mac label opts this run into macOS.
     runs-on: ${{ contains(inputs.labels_json, '"mac"') && 'macos-latest' || 'ubuntu-latest' }}
+    # GitHub-hosted jobs are killed (reported as cancelled) at 6h; stop just before that.
+    timeout-minutes: 355
     permissions:
       id-token: write
       contents: write
@@ -86,6 +88,9 @@ jobs:
       SSH_ONLY_REQUEST: ${{ contains(inputs.labels_json, '"ssh"') }}
       VALIDATION_ENABLED: ${{ vars.VALIDATION_ENABLED || 'true' }}
     steps:
+      - name: Record job start time
+        shell: bash
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
       - name: Authenticate status callbacks
         shell: bash
         env:
@@ -1186,7 +1191,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Mark issue complete
-        if: success() && env.TEST_REQUEST == 'true' && env.SSH_ONLY_REQUEST != 'true'
+        if: success() && env.SSH_ONLY_REQUEST != 'true'
         continue-on-error: true
         uses: actions/github-script@v7
         with:
@@ -1268,7 +1273,14 @@ jobs:
         shell: bash
         env:
           HOLD_SECONDS: ${{ job.status == 'failure' && '1800' || '18000' }}
-        run: /usr/bin/time -p sleep "$HOLD_SECONDS"
+          # End the hold ~5 minutes before the 355-minute job timeout so cleanup and the
+          # final status report run and the job does not end as cancelled.
+          HOLD_DEADLINE_SECONDS: '21000'
+        run: |
+          started=${JOB_STARTED_AT:-$(date +%s)}
+          remaining=$(( HOLD_DEADLINE_SECONDS - ($(date +%s) - started) ))
+          hold=$(( HOLD_SECONDS < remaining ? HOLD_SECONDS : remaining ))
+          if (( hold > 0 )); then /usr/bin/time -p sleep "$hold"; else echo 'No time left for the temporary access hold.'; fi
 
       - name: Sync and release account credentials
         if: always()
