@@ -7,15 +7,23 @@ import captures from './wip-screenshots.cjs'
 import { uploadScreenshots } from './wip-upload.mjs'
 
 const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('fixture')])
-test('accept only registered project origins, preserve capture time, retry uploads, and deduplicate', async () => {
+test('accept registered origins and any loopback port except controller ports, preserve capture time, retry uploads, and deduplicate', async () => {
   const web = mkdtempSync(join(tmpdir(), 'wip-queue-'))
-  const env = { OPENCODE_WEB_DIR: web, APP_PORT: '3000', GITHUB_REPOSITORY: 'alice/game', TRIGGER_ISSUE_NUMBER: '4', GITHUB_RUN_ID: '123', OMGITHUB_CALLBACK_TOKEN: 'fixture' }
+  const env = { OPENCODE_WEB_DIR: web, APP_PORT: '3000', OPENCODE_WEB_PORT: '41001', OPENCODE_CONTROL_PORT: '41002', GITHUB_REPOSITORY: 'alice/game', TRIGGER_ISSUE_NUMBER: '4', GITHUB_RUN_ID: '123', OMGITHUB_CALLBACK_TOKEN: 'fixture' }
   try {
     writeFileSync(join(web, 'app-url'), 'https://project.trycloudflare.com')
     writeFileSync(join(web, 'project-preview-origins.json'), JSON.stringify(['http://localhost:4000']))
-    for (const url of ['http://localhost:3000/play', 'http://127.0.0.1:3000', 'https://project.trycloudflare.com/play', 'http://localhost:4000']) assert.equal(captures.isProjectPage(url, env), true)
-    for (const url of ['https://reference.example', 'https://other.trycloudflare.com', 'http://localhost:5555', 'data:image/png,x', 'http://localhost:3000.evil.test']) assert.equal(captures.isProjectPage(url, env), false)
-    assert.equal(captures.queueScreenshot(png, { page_url: 'https://reference.example' }, env), null)
+    writeFileSync(join(web, 'controller-ports'), '41001 41003 41002\n')
+    for (const url of ['http://localhost:3000/play', 'http://127.0.0.1:3000', 'https://project.trycloudflare.com/play', 'http://localhost:4000', 'http://localhost:3002/', 'http://127.0.0.1:5173', 'http://[::1]:8080', 'http://localhost/']) assert.equal(captures.isProjectPage(url, env), true)
+    for (const url of ['https://reference.example', 'https://other.trycloudflare.com', 'data:image/png,x', 'http://localhost:3000.evil.test', 'http://localhost:41001/session', 'http://127.0.0.1:41002', 'http://127.0.0.1:41003/', 'http://localhost:4096', 'http://127.0.0.1:20241/metrics', 'http://localhost.evil.test:3002', 'http://10.0.0.5:3002']) assert.equal(captures.isProjectPage(url, env), false)
+    assert.equal(captures.skipReason('http://localhost:41003/', env), 'controller port')
+    assert.equal(captures.skipReason('https://reference.example/x', env), 'origin not a project preview')
+    assert.equal(captures.queueScreenshot(png, { page_url: 'https://reference.example/p?token=hidden' }, env), null)
+    assert.equal(captures.queueScreenshot(png, { page_url: 'http://127.0.0.1:41001/session?token=hidden' }, env), null)
+    const skipped = readFileSync(join(web, 'wip-capture.log'), 'utf8')
+    assert.match(skipped, /WIP screenshot skipped: origin not a project preview \(https:\/\/reference\.example\)/)
+    assert.match(skipped, /WIP screenshot skipped: controller port \(http:\/\/127\.0\.0\.1:41001\)/)
+    assert.doesNotMatch(skipped, /hidden|session/)
     const hash = captures.queueScreenshot(png, { page_url: 'http://localhost:3000/game?token=hidden', captured_at: 123 }, env)
     assert.equal(captures.queueScreenshot(png, { page_url: 'http://localhost:3000/game', captured_at: 456 }, env), hash)
     const metadata = JSON.parse(readFileSync(join(web, 'wip-queue', `${hash}.json`)))

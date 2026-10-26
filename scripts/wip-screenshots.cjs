@@ -1,8 +1,20 @@
 const { createHash } = require('node:crypto')
-const { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } = require('node:fs')
+const { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, appendFileSync } = require('node:fs')
 const { join } = require('node:path')
 
 function webDirectory(env) { return env.OMGITHUB_CAPTURE_WEB_DIR || env.OPENCODE_WEB_DIR }
+// Controller-owned loopback ports never count as project pages: the OpenCode
+// server default, and cloudflared's default metrics range. Runtime-allocated
+// controller ports come from the workflow env and $OPENCODE_WEB_DIR/controller-ports.
+const CONTROLLER_PORTS = [4096, 20241, 20242, 20243, 20244, 20245]
+const CONTROLLER_PORT_ENV = ['OPENCODE_WEB_PORT', 'OPENCODE_CONTROL_PORT', 'PROJECT_FILE_PORT']
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+function controllerPorts(env = process.env) {
+  const ports = [...CONTROLLER_PORTS, ...CONTROLLER_PORT_ENV.map(name => env[name])]
+  const directory = webDirectory(env)
+  if (directory) try { ports.push(...readFileSync(join(directory, 'controller-ports'), 'utf8').split(/\s+/)) } catch {}
+  return new Set(ports.map(Number).filter(port => Number.isSafeInteger(port) && port > 0))
+}
 function projectOrigins(env = process.env) {
   const directory = webDirectory(env)
   const port = env.APP_PORT || 3000
@@ -10,13 +22,29 @@ function projectOrigins(env = process.env) {
   if (env.APP_URL) urls.push(env.APP_URL)
   if (directory) {
     try { urls.push(readFileSync(join(directory, 'app-url'), 'utf8').trim()) } catch {}
-    // Register additional project servers explicitly; never infer from localhost.
     try { urls.push(...JSON.parse(readFileSync(join(directory, 'project-preview-origins.json'), 'utf8'))) } catch {}
   }
   return new Set(urls.flatMap(url => { try { return [new URL(url).origin] } catch { return [] } }))
 }
-function isProjectPage(url, env = process.env) {
-  try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) && projectOrigins(env).has(parsed.origin) } catch { return false }
+// Returns '' for project pages, otherwise the skip reason.
+function skipReason(url, env = process.env) {
+  let parsed
+  try { parsed = new URL(url) } catch { return 'invalid page URL' }
+  if (!/^https?:$/.test(parsed.protocol)) return 'non-HTTP page'
+  if (projectOrigins(env).has(parsed.origin)) return ''
+  if (LOOPBACK_HOSTS.has(parsed.hostname)) {
+    const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
+    return controllerPorts(env).has(port) ? 'controller port' : ''
+  }
+  return 'origin not a project preview'
+}
+function isProjectPage(url, env = process.env) { return !skipReason(url, env) }
+function safeOrigin(url) { try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) ? parsed.origin : parsed.protocol } catch { return 'invalid' } }
+function logSkip(reason, url, env) {
+  const line = `WIP screenshot skipped: ${reason} (${safeOrigin(url)})`
+  console.error(line)
+  const web = webDirectory(env)
+  if (web) try { appendFileSync(join(web, 'wip-capture.log'), `${new Date().toISOString()} ${line}\n`) } catch {}
 }
 function imageType(bytes) {
   if (bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') return 'image/png'
@@ -26,9 +54,12 @@ function imageType(bytes) {
 }
 function queueScreenshot(bytes, metadata, env = process.env) {
   const web = webDirectory(env)
-  if (!web || !isProjectPage(metadata.page_url, env) || !Buffer.isBuffer(bytes) || !bytes.length || bytes.length > 10 * 1024 * 1024) return null
+  if (!web) return null
+  const reason = skipReason(metadata.page_url, env)
+  if (reason) { logSkip(reason, metadata.page_url, env); return null }
+  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > 10 * 1024 * 1024) { logSkip('empty or over 10 MB', metadata.page_url, env); return null }
   const type = imageType(bytes)
-  if (!type) return null
+  if (!type) { logSkip('not PNG, JPEG, or WebP', metadata.page_url, env); return null }
   const hash = createHash('sha256').update(bytes).digest('hex'), dir = join(web, 'wip-queue')
   mkdirSync(dir, { recursive: true })
   if (existsSync(join(dir, `${hash}.json`)) || existsSync(join(dir, `${hash}.done`))) return hash
@@ -84,4 +115,4 @@ function instrument(playwright, env = process.env) {
     }
   }
 }
-module.exports = { projectOrigins, isProjectPage, imageType, queueScreenshot, instrument, webDirectory }
+module.exports = { projectOrigins, controllerPorts, skipReason, isProjectPage, imageType, queueScreenshot, instrument, webDirectory }

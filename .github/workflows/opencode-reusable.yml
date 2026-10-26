@@ -677,6 +677,8 @@ jobs:
             printf 'PROJECT_FILE_PORT=%s\n' "$PROJECT_FILE_PORT"
             printf 'OPENCODE_CONTROL_PORT=%s\n' "$OPENCODE_CONTROL_PORT"
           } >> "$GITHUB_ENV"
+          # WIP capture skips these controller ports; OpenCode's tools do not inherit all of them.
+          printf '%s %s %s\n' "$OPENCODE_WEB_PORT" "$PROJECT_FILE_PORT" "$OPENCODE_CONTROL_PORT" > "$OPENCODE_WEB_DIR/controller-ports"
           echo "Allocated OpenCode port: $OPENCODE_WEB_PORT"
           echo "Allocated project file server port: $PROJECT_FILE_PORT"
           nohup "$OPENCODE_BIN" serve --hostname 127.0.0.1 --port "$OPENCODE_WEB_PORT" \

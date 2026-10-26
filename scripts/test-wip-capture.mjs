@@ -14,7 +14,7 @@ const evidence = process.env.EVIDENCE_DIR || '/tmp/omgithub-wip-capture'
 mkdirSync(evidence, { recursive: true })
 const web = mkdtempSync(join(tmpdir(), 'wip-real-'))
 const project = createServer((req, res) => res.end('<html><body style="background:#181818;color:white"><h1>Project under construction</h1><canvas width="600" height="240"></canvas><script>let c=document.querySelector("canvas").getContext("2d");c.fillStyle="#ff6719";c.fillRect(20,20,500,200)</script></body></html>'))
-const reference = createServer((req, res) => res.end('<h1>Reference website</h1>'))
+const reference = createServer((req, res) => res.end('<h1>OpenCode controller</h1>'))
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
 const started = Date.now(), sessions = ['wip-main-test', 'wip-child-test']
 const env = { ...process.env, CI: '1', OMGITHUB_CAPTURE_WEB_DIR: web, OMGITHUB_PLAYWRIGHT_ROOT: runtime,
@@ -26,6 +26,8 @@ const run = async (...args) => {
 }
 try {
   await listen(project); await listen(reference)
+  // The second server stands in for the controller's OpenCode web port.
+  env.OPENCODE_WEB_PORT = String(reference.address().port)
   const url = `http://127.0.0.1:${project.address().port}`
   writeFileSync(join(web, 'app-url'), url)
   const config = join(web, 'config.json')
@@ -39,7 +41,8 @@ try {
   assert.ok(items().every(item => item.page_url === url + '/'))
   await run(`-s=${sessions[1]}`, 'goto', `http://127.0.0.1:${reference.address().port}`)
   await run(`-s=${sessions[1]}`, 'screenshot', `--filename=${resolve(evidence, 'reference.png')}`)
-  assert.equal(items().length, 2, 'exclude a reference website even on localhost')
+  assert.equal(items().length, 2, 'exclude the controller OpenCode port on localhost')
+  assert.match(readFileSync(join(web, 'wip-capture.log'), 'utf8'), /WIP screenshot skipped: controller port/)
   await run(`-s=${sessions[0]}`, 'screenshot', `--filename=${resolve(evidence, 'duplicate.png')}`)
   assert.equal(items().length, 2, 'deduplicate identical captures')
   console.log(JSON.stringify({ ok: true, captures: items().length, elapsedMs: Date.now() - started, evidence }))
