@@ -86,7 +86,9 @@ export function finishedV2Message(snapshot, { allowInterrupted = false } = {}) {
   const first = snapshot.messages.find(message => ['idle', 'assistant', 'user'].includes(message.type))
   if (first?.type !== 'idle' || !['succeeded', ...(allowInterrupted ? ['interrupted'] : [])].includes(first.outcome)) return null
   const latest = snapshot.messages.find(message => message.type === 'assistant' || message.type === 'user')
-  const validOutcome = first.outcome === 'succeeded' ? !latest?.error : latest?.error?.type === 'aborted'
+  // A stopped turn is terminal once the idle marker says interrupted; the
+  // projected assistant may carry an aborted error or none at all.
+  const validOutcome = first.outcome === 'succeeded' ? !latest?.error : true
   return latest?.type === 'assistant' && validOutcome && messagePattern.test(latest.id || '') ? latest.id : null
 }
 
@@ -95,4 +97,16 @@ export function validateV2Session(session) {
       !Array.isArray(session.messages) || !session.messages.length ||
       session.messages.some(message => typeof message?.type !== 'string')) throw new Error('Invalid V2 main-session transcript')
   return session
+}
+
+// V2 deep links carry the page origin as a path segment. A bare /session/:id
+// renders the client error page, so build the link from the public origin.
+export function v2SessionUrl(publicOrigin, sessionID) {
+  if (!idPattern.test(sessionID)) throw new Error('Invalid session ID')
+  const url = new URL(publicOrigin)
+  if (!['http:', 'https:'].includes(url.protocol) || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('Require a bare public origin')
+  }
+  const origin = url.origin
+  return `${origin}/server/${Buffer.from(origin).toString('base64url')}/session/${sessionID}`
 }

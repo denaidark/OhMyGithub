@@ -86,6 +86,12 @@ try {
   for (let attempt = 0; attempt < 60 && !stoppedMessage; attempt++) {
     const stoppedState = await api.snapshot(sessionID)
     stoppedMessage = finishedV2Message(stoppedState, { allowInterrupted: true })
+    // A provider retry can restart a step after the first interrupt.
+    if (!stoppedMessage && stoppedState.busy && attempt > 0 && attempt % 20 === 0) await proxied.interrupt(sessionID)
+    if (attempt === 59) {
+      const newest = stoppedState.messages.slice(0, 3).map(row => `${row.type}:${row.outcome || row.finish || ''}:${row.error?.type || ''}`).join(', ')
+      console.error(`Stop diagnostics: busy=${stoppedState.busy} newest=${newest}`)
+    }
     if (!stoppedMessage) await new Promise(resolve => setTimeout(resolve, 250))
   }
   if (!stopSent || !stoppedMessage || stoppedMessage === priorMessage) throw new Error('V2 stopped session was not checkpointable')

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyV2Event, createV2Client, finishedV2Message, normalizeV2Version, validateV2Session } from './opencode-v2-api.mjs'
+import { classifyV2Event, createV2Client, finishedV2Message, normalizeV2Version, validateV2Session, v2SessionUrl } from './opencode-v2-api.mjs'
 
 test('normalize the V2 CLI version and reject incompatible versions', () => {
   assert.equal(normalizeV2Version('opencode v2.2.2\n'), '2.2.2')
@@ -49,7 +49,8 @@ test('handle busy sessions and validate V2 transcript structure', () => {
   const stopped = { busy: false, messages: [{ type: 'idle', outcome: 'interrupted' }, { type: 'assistant', id: 'msg_stop', error: { type: 'aborted' } }] }
   assert.equal(finishedV2Message(stopped), null)
   assert.equal(finishedV2Message(stopped, { allowInterrupted: true }), 'msg_stop')
-  assert.equal(finishedV2Message({ ...stopped, messages: [stopped.messages[0], { ...stopped.messages[1], error: { type: 'other' } }] }, { allowInterrupted: true }), null)
+  assert.equal(finishedV2Message({ ...stopped, messages: [stopped.messages[0], { type: 'assistant', id: 'msg_plain' }] }, { allowInterrupted: true }), 'msg_plain')
+  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle', outcome: 'interrupted' }, { type: 'user', id: 'msg_user' }] }, { allowInterrupted: true }), null)
   const transcript = { info: { id: 'ses_123' }, messages: [{ type: 'user' }, { type: 'assistant' }, { type: 'idle' }] }
   assert.equal(validateV2Session(transcript), transcript)
   assert.throws(() => validateV2Session({ ...transcript, info: { id: 'ses_123', fork: { sessionID: 'ses_parent' } } }), /main-session/)
@@ -68,4 +69,12 @@ test('parse fragmented V2 server-sent events without confusing heartbeats', asyn
   for await (const event of api.events()) events.push(event)
   assert.deepEqual(events.map(event => event.type), ['server.connected', 'session.execution.succeeded'])
   assert.equal(classifyV2Event(events[1], 'ses_123'), 'completed')
+})
+
+test('build a V2 deep link from the public origin instead of the local server', () => {
+  const origin = 'https://quiet-rock.trycloudflare.com'
+  assert.equal(v2SessionUrl(origin, 'ses_abc123'), `${origin}/server/${Buffer.from(origin).toString('base64url')}/session/ses_abc123`)
+  assert.equal(v2SessionUrl(`${origin}/`, 'ses_abc123'), v2SessionUrl(origin, 'ses_abc123'))
+  for (const value of [`${origin}/path`, `${origin}?x=1`, 'ftp://example.com']) assert.throws(() => v2SessionUrl(value, 'ses_abc123'), /public origin/)
+  assert.throws(() => v2SessionUrl(origin, 'msg_abc'), /session ID/)
 })
