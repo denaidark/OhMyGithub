@@ -80,8 +80,14 @@ try {
     if (kind === 'failed' || (kind === 'completed' && !stopSent)) throw new Error(`V2 stop test unexpectedly ${kind}`)
     if (kind === 'interrupted') stopped = true
   }
-  const stoppedState = await api.snapshot(sessionID)
-  const stoppedMessage = finishedV2Message(stoppedState, { allowInterrupted: true })
+  // The interrupted idle projection arrives after the event, so poll instead of
+  // reading one snapshot that can still report the session as busy.
+  let stoppedMessage = ''
+  for (let attempt = 0; attempt < 60 && !stoppedMessage; attempt++) {
+    const stoppedState = await api.snapshot(sessionID)
+    stoppedMessage = finishedV2Message(stoppedState, { allowInterrupted: true })
+    if (!stoppedMessage) await new Promise(resolve => setTimeout(resolve, 250))
+  }
   if (!stopSent || !stoppedMessage || stoppedMessage === priorMessage) throw new Error('V2 stopped session was not checkpointable')
   await waitReady(stoppedMessage)
   console.log('V2 proxy prompt, lifecycle save, execution events, active stop, fork and idle interrupt passed')
