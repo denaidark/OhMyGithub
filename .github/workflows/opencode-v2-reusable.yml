@@ -61,6 +61,22 @@ jobs:
         run: /usr/bin/time -p bash "$GITHUB_WORKSPACE/runtime/scripts/v2-experiment-run.sh"
 
       - name: Verify the public V2 session link
+        if: inputs.platform != 'mac'
+        shell: bash
+        run: |
+          password="$(sed -n 's/^::add-mask:://p' "$RUNNER_TEMP/v2-experiment.log" | head -n 1)"
+          [[ -n "$password" ]] || { echo 'Missing generated V2 password' >&2; exit 1; }
+          printf 'OPENCODE_PASSWORD=%s\n' "$password" >> "$GITHUB_ENV"
+          export OPENCODE_PASSWORD="$password"
+          /usr/bin/time -p bash "$GITHUB_WORKSPACE/runtime/scripts/v2-experiment-web.sh"
+
+      - name: Repair Mac DNS for the public link
+        if: inputs.platform == 'mac'
+        shell: bash
+        run: /usr/bin/time -p bash "$GITHUB_WORKSPACE/runtime/scripts/setup-mac-dns.sh"
+
+      - name: Verify the public V2 session link on macOS
+        if: inputs.platform == 'mac'
         shell: bash
         run: |
           password="$(sed -n 's/^::add-mask:://p' "$RUNNER_TEMP/v2-experiment.log" | head -n 1)"
