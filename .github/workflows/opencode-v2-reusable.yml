@@ -16,6 +16,8 @@ on:
     secrets:
       AGENTSWEB_SSH_PUBLIC_KEY:
         required: true
+      OPENROUTER_API_KEY:
+        required: false
 
 permissions: {}
 
@@ -32,6 +34,7 @@ jobs:
       ISSUE_NUMBER: ${{ inputs.issue_number }}
       AGENTSWEB_SSH_PUBLIC_KEY: ${{ secrets.AGENTSWEB_SSH_PUBLIC_KEY }}
       OPENCODE_V2_VERSION: '2.2.2'
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       - name: Check out disposable test project
         uses: actions/checkout@v4

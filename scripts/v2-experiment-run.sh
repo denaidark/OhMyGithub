@@ -4,7 +4,7 @@ set -euo pipefail
 timed() { local start=$SECONDS; "$@"; local rc=$?; printf '[timing] %s: %ss\n' "$1" "$((SECONDS-start))" >&2; return "$rc"; }
 work="$RUNNER_TEMP/omgithub-v2"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bounded() { python3 "$script_dir/v2-experiment-bounded.py" 120 "$@"; }
+bounded() { python3 "$script_dir/v2-experiment-bounded.py" "${BOUND_SECONDS:-120}" "$@"; }
 timed mkdir -p "$work/home" "$work/config" "$work/data" "$work/cache" "$work/restore-home" "$work/restore-data" "$work/restore-config" "$work/restore-cache"
 export HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/data" XDG_CACHE_HOME="$work/cache"
 OPENCODE_PASSWORD="$(openssl rand -hex 24)"
@@ -28,13 +28,29 @@ for _ in {1..60}; do
 done
 timed node -e 'const i=require(process.argv[1]);if(i.version!==process.argv[2])throw Error("Unexpected server version");console.log("V2 server is healthy:",i.version)' "$work/info.json" "$OPENCODE_V2_VERSION"
 # shellcheck disable=SC2016
-model="$(node --input-type=module -e '
-const preferred=["deepseek-v4.1-flash-free","glm-5.3-flash-free","mimo-v2.6-flash-free","big-pickle"];
-try {const r=await fetch("https://models.opencode.ai/api.json",{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error(`HTTP ${r.status}`);const c=await r.json();const m=c.opencode?.models||{};const id=preferred.find(id=>m[id]&&m[id].status!=="deprecated"&&m[id].tool_call===true&&m[id].cost?.input===0&&m[id].cost?.output===0);console.log(`opencode/${id||preferred[0]}`)}catch{console.log(`opencode/${preferred[0]}`)}')"
-echo "Selected model: $model"
+models="$(node --input-type=module -e '
+const preferred=["opencode/deepseek-v4.1-flash-free","opencode/glm-5.3-flash-free","opencode/mimo-v2.6-flash-free","opencode/big-pickle"];
+const usable=m=>m&&m.status!=="deprecated"&&m.tool_call===true&&m.cost?.input===0&&m.cost?.output===0;
+let ids=preferred;
+try{const r=await fetch("https://models.opencode.ai/api.json",{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error(`HTTP ${r.status}`);const m=(await r.json()).opencode?.models||{};const live=preferred.filter(id=>usable(m[id.slice("opencode/".length)]));if(live.length)ids=live}catch{}
+// Anonymous free tier is rate limited; a connected provider keeps the run testable.
+if(process.env.OPENROUTER_API_KEY)ids.push("openrouter/cohere/north-mini-code:free");
+console.log(JSON.stringify(ids))')"
+echo "Model fallback order: $models"
 prompt='Create v2-test-result.txt containing exactly ACTIONS_V2_OK. Do not use git. Reply DONE when finished.'
-bounded "$bin" run --server "http://127.0.0.1:$port" --auto --model "$model" --format json "$prompt" > "$work/run.jsonl"
-[[ "$(cat v2-test-result.txt)" == ACTIONS_V2_OK ]] || { echo 'Model did not create the expected test file' >&2; exit 1; }
+# Free models are routinely rate limited. Try the preferred order so a single
+# 429 does not turn into a misleading workflow failure.
+model=''
+for candidate in $(node -e 'console.log(JSON.parse(process.argv[1]).join(" "))' "$models"); do
+  echo "Trying model: $candidate"
+  : > v2-test-result.txt
+  if BOUND_SECONDS=90 bounded "$bin" run --server "http://127.0.0.1:$port" --auto --model "$candidate" --format json "$prompt" > "$work/run.jsonl"; then
+    if [[ "$(cat v2-test-result.txt 2>/dev/null)" == ACTIONS_V2_OK ]]; then model="$candidate"; break; fi
+  fi
+  echo "Model $candidate did not complete the prompt" >&2
+done
+[[ -n "$model" ]] || { echo 'No free model completed the test prompt' >&2; exit 1; }
+echo "Selected model: $model"
 session="$(node -e 'const fs=require("fs");for(const s of fs.readFileSync(process.argv[1],"utf8").split("\n")){try{const x=JSON.parse(s);if(x.sessionID){console.log(x.sessionID);break}}catch{}}' "$work/run.jsonl")"
 [[ "$session" == ses_* ]] || { echo 'Missing session ID' >&2; exit 1; }
 echo "Session: $session"
