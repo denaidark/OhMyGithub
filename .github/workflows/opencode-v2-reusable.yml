@@ -1,0 +1,71 @@
+name: OpenCode V2 experiment
+
+on:
+  workflow_call:
+    inputs:
+      runtime_ref:
+        required: true
+        type: string
+      issue_number:
+        required: true
+        type: string
+      platform:
+        required: false
+        default: linux
+        type: string
+    secrets:
+      AGENTSWEB_SSH_PUBLIC_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner
+    runs-on: ${{ inputs.platform == 'mac' && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      AGENTSWEB_SSH_PUBLIC_KEY: ${{ secrets.AGENTSWEB_SSH_PUBLIC_KEY }}
+      OPENCODE_V2_VERSION: '2.2.2'
+    steps:
+      - name: Check out disposable test project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          persist-credentials: false
+
+      - name: Check out pinned experimental runtime
+        uses: actions/checkout@v4
+        with:
+          repository: denaidark/OhMyGithub
+          ref: ${{ inputs.runtime_ref }}
+          path: runtime
+          persist-credentials: false
+
+      - name: Start and verify temporary SSH
+        id: ssh
+        shell: bash
+        run: /usr/bin/time -p bash "$GITHUB_WORKSPACE/runtime/scripts/v2-experiment-ssh.sh"
+
+      - name: Test OpenCode V2 without plugins
+        shell: bash
+        working-directory: ${{ github.workspace }}/project
+        run: /usr/bin/time -p bash "$GITHUB_WORKSPACE/runtime/scripts/v2-experiment-run.sh"
+
+      - name: Keep the test worker available for inspection
+        if: always() && steps.ssh.outcome == 'success'
+        shell: bash
+        run: /usr/bin/time -p sleep 300
+
+      - name: Stop temporary processes
+        if: always()
+        shell: bash
+        run: |
+          for file in "$RUNNER_TEMP/omgithub-v2/server.pid" "$RUNNER_TEMP/omgithub-v2-ssh/tunnel.pid" "$RUNNER_TEMP/omgithub-v2-ssh/sshd.pid"; do
+            if [[ -f "$file" ]]; then /usr/bin/time -p sudo kill "$(cat "$file")" 2>/dev/null || true; fi
+          done
