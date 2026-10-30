@@ -37,6 +37,7 @@ export function createV2Client({ base, password, request = fetch }) {
   }
   return {
     info: () => call('/api/info'),
+    pair: () => call('/api/pair', { method: 'POST', body: {} }),
     async session(id) { return (await call(pathFor(id))).data },
     async messages(id) { return (await call(pathFor(id, '/message'))).data },
     async active() { return (await call('/api/session/active')).data },

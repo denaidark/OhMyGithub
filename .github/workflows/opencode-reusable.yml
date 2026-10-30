@@ -43,6 +43,8 @@ on:
         required: false
       AGENTSWEB_SSH_PUBLIC_KEY:
         required: false
+      OPENROUTER_API_KEY:
+        required: false
 jobs:
   opencode:
     # Ubuntu is the default; the mac label opts this run into macOS.
@@ -60,6 +62,8 @@ jobs:
       PROJECT_PATH: ${{ vars.PROJECT_DIR || './' }}
       PROJECT_DIR: ${{ github.workspace }}/${{ vars.PROJECT_DIR || './' }}
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENCODE_V2_REQUESTED: ${{ vars.OPENCODE_V2 }}
       OPENCODE_AUTH_CONTENT: ${{ secrets.OPENCODE_AUTH_JSON }}
       OPENCODE_EXPERIMENTAL: "true"
       OPENCODE_EXPERIMENTAL_WORKSPACES: "true"
@@ -197,6 +201,24 @@ jobs:
         if: env.TEST_REQUEST != 'true' && env.SSH_ONLY_REQUEST != 'true'
         shell: bash
         run: /usr/bin/time -p node "$RUNTIME_DIR/scripts/session-checkpoint.mjs" prepare
+
+      - name: Select OpenCode runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          v2=0
+          if [[ -n "${RESUME_OPENCODE_VERSION:-}" ]]; then
+            [[ "$RESUME_OPENCODE_VERSION" == 2.* ]] && v2=1
+          elif [[ "${OPENCODE_V2_REQUESTED:-}" == '1' && "$TEST_REQUEST" != 'true' ]]; then
+            v2=1
+          fi
+          printf 'OPENCODE_V2=%s\n' "$v2" >> "$GITHUB_ENV"
+          if [[ "$v2" == '1' ]]; then
+            password="$(openssl rand -hex 24)"
+            echo "::add-mask::$password"
+            printf 'OPENCODE_PASSWORD=%s\nGOAL_REQUEST=false\nRALPH_REQUEST=false\nOMO_REQUEST=false\n' "$password" >> "$GITHUB_ENV"
+            echo 'OpenCode 2 is enabled; plugin-backed modes are disabled.'
+          fi
 
       - name: Configure Linux Playwright CLI with WebGPU
         if: runner.os == 'Linux'
@@ -579,14 +601,19 @@ jobs:
           set -euo pipefail
           install -d -m 700 "$OPENCODE_WEB_DIR"
           OPENCODE_VERSION="${RESUME_OPENCODE_VERSION:-}"
+          if [[ -z "$OPENCODE_VERSION" && "$OPENCODE_V2" == 1 ]]; then OPENCODE_VERSION=2.2.2; fi
           if [[ -z "$OPENCODE_VERSION" ]]; then
           release_url="$(/usr/bin/time -p curl --fail --silent --show-error --location --retry 3 --max-time 30 \
             --output /dev/null --write-out '%{url_effective}' https://github.com/anomalyco/opencode/releases/latest)"
           OPENCODE_VERSION="${release_url##*/v}"
           fi
           [[ "$OPENCODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          curl --fail --silent --show-error --location https://opencode.ai/install \
-            | bash -s -- --version "$OPENCODE_VERSION"
+          if [[ "$OPENCODE_V2" == 1 ]]; then
+            /usr/bin/time -p curl --fail --silent --show-error --location https://opencode.ai/v2/install -o "$OPENCODE_WEB_DIR/install-v2.sh"
+            /usr/bin/time -p bash "$OPENCODE_WEB_DIR/install-v2.sh" --version "$OPENCODE_VERSION" --no-modify-path
+          else
+            curl --fail --silent --show-error --location https://opencode.ai/install | bash -s -- --version "$OPENCODE_VERSION"
+          fi
           OPENCODE_BIN="$HOME/.opencode/bin/opencode"
           [[ -x "$OPENCODE_BIN" ]]
           # The installer runs in a child shell; publish PATH for Actions and fresh SSH shells.
@@ -606,7 +633,7 @@ jobs:
             }
           }
           EOF
-          if [[ "$OMO_REQUEST" == 'true' && "$RALPH_REQUEST" != 'true' ]]; then
+          if [[ "$OPENCODE_V2" != 1 && "$OMO_REQUEST" == 'true' && "$RALPH_REQUEST" != 'true' ]]; then
             echo 'Installing oh-my-openagent for the omo-labeled request'
             if ! command -v bun >/dev/null 2>&1; then
               curl --fail --silent --show-error --location https://bun.sh/install | bash
@@ -632,7 +659,9 @@ jobs:
               --skip-auth
           fi
           config_tmp="$OPENCODE_WEB_DIR/opencode.json"
-          if [[ "$RALPH_REQUEST" == 'true' ]]; then
+          if [[ "$OPENCODE_V2" == 1 ]]; then
+            jq '.plugin = []' "$HOME/.config/opencode/opencode.json" > "$config_tmp"
+          elif [[ "$RALPH_REQUEST" == 'true' ]]; then
             npm install --prefix "$HOME/.config/opencode" --no-save --no-package-lock \
               --ignore-scripts opencode-ralph-loop@1.0.10
             jq '
@@ -712,7 +741,15 @@ jobs:
             done
             return 1
           }
-          if ! wait_for_http "http://127.0.0.1:$OPENCODE_WEB_PORT/global/health" 45; then
+          if [[ "$OPENCODE_V2" == 1 ]]; then
+            healthy=false
+            for _ in {1..45}; do
+              if curl --fail --silent --show-error --max-time 3 -u "opencode:$OPENCODE_PASSWORD" "http://127.0.0.1:$OPENCODE_WEB_PORT/api/info" > "$OPENCODE_WEB_DIR/info.json" && \
+                node -e 'const i=require(process.argv[1]);if(i.version!==process.argv[2])process.exit(1)' "$OPENCODE_WEB_DIR/info.json" "$OPENCODE_VERSION"; then healthy=true; break; fi
+              sleep 1
+            done
+            [[ "$healthy" == true ]] || { echo 'OpenCode V2 server did not become healthy' >&2; exit 1; }
+          elif ! wait_for_http "http://127.0.0.1:$OPENCODE_WEB_PORT/global/health" 45; then
             echo 'OpenCode server did not become healthy; server log follows:' >&2
             curl --silent --show-error --max-time 10 \
               -i "http://127.0.0.1:$OPENCODE_WEB_PORT/global/health" >&2 || true
@@ -979,7 +1016,22 @@ jobs:
             [[ -n "${OPENCODE_VARIANT:-}" ]] && variant_args=(--variant "$OPENCODE_VARIANT")
             resume_args=()
             [[ -n "${RESUME_SESSION_ID:-}" ]] && resume_args=(--session "$RESUME_SESSION_ID")
-            if [[ -n "${RESUME_SESSION_ID:-}" ]]; then
+            if [[ "$OPENCODE_V2" == 1 ]]; then
+              cd "$PROJECT_DIR" || exit 1
+              exact_prompt="$(cat "$3"; printf .)"
+              exact_prompt="${exact_prompt%.}"
+              "$1" run "${resume_args[@]}" --auto --server "http://127.0.0.1:$2" --model "$6" --format json "$exact_prompt" > "$4" 2>&1
+              code=$?
+              if [[ "$code" != 0 && -n "${OPENROUTER_API_KEY:-}" ]] && grep -Eiq "FreeUsageLimit|rate.limit|HTTP.?429" "$4"; then
+                fallback_session="$(node "$RUNTIME_DIR/scripts/v2-log-session.mjs" "$4")"
+                [[ -n "$fallback_session" ]] && resume_args=(--session "$fallback_session")
+                printf "%s\n" "openrouter/cohere/north-mini-code:free" > "$OPENCODE_WEB_DIR/main-model"
+                echo "Retrying the rate-limited request with the connected OpenRouter provider" >> "$4"
+                "$1" run "${resume_args[@]}" --auto --server "http://127.0.0.1:$2" --model "openrouter/cohere/north-mini-code:free" --format json "$exact_prompt" >> "$4" 2>&1
+              else
+                (exit "$code")
+              fi
+            elif [[ -n "${RESUME_SESSION_ID:-}" ]]; then
               exact_prompt="$(cat "$3"; printf .)"
               exact_prompt="${exact_prompt%.}"
               "$1" run --session "$RESUME_SESSION_ID" --auto --dangerously-skip-permissions --attach "http://127.0.0.1:$2" --dir "$PROJECT_DIR" --model "$6" "${variant_args[@]}" "$exact_prompt" > "$4" 2>&1
@@ -1003,19 +1055,26 @@ jobs:
           SESSION_ID="${RESUME_SESSION_ID:-}"
           for _ in {1..120}; do
             [[ "$SESSION_ID" == ses_* ]] && break
-            SESSION_ID="$(curl --fail --silent --show-error \
-              -H "x-opencode-directory: $PROJECT_DIR" \
-              "http://127.0.0.1:$OPENCODE_WEB_PORT/session" | jq -r '.[0].id // empty')"
+            if [[ "$OPENCODE_V2" == 1 ]]; then
+              SESSION_ID="$(node -e 'const fs=require("fs");try { for(const line of fs.readFileSync(process.argv[1],"utf8").split("\n")) { try { const row=JSON.parse(line); if(/^ses_[A-Za-z0-9]+$/.test(row.sessionID||"")) { process.stdout.write(row.sessionID); break } } catch {} } } catch {}' "$OPENCODE_WEB_DIR/opencode-run.log")"
+            else
+              SESSION_ID="$(curl --fail --silent --show-error -H "x-opencode-directory: $PROJECT_DIR" "http://127.0.0.1:$OPENCODE_WEB_PORT/session" | jq -r '.[0].id // empty')"
+            fi
             [[ "$SESSION_ID" == ses_* ]] && break
+            [[ -f "$OPENCODE_WEB_DIR/opencode-run.exit" ]] && { tail -40 "$OPENCODE_WEB_DIR/opencode-run.log" >&2; break; }
             sleep 1
           done
           [[ "$SESSION_ID" == ses_* ]]
           /usr/bin/time -p printf '%s\n' "$SESSION_ID" > "$OPENCODE_WEB_DIR/checkpoint-session-id"
           /usr/bin/time -p curl --fail --silent "http://127.0.0.1:$OPENCODE_CONTROL_PORT/omgithub/heartbeat"
           /usr/bin/time -p curl --fail --silent "http://127.0.0.1:$OPENCODE_CONTROL_PORT/omgithub/reconcile"
-          DIRECTORY_B64="$(printf '%s' "$PROJECT_DIR" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
-          printf 'session_id=%s\nsession_url=%s\n' "$SESSION_ID" \
-            "${OPENCODE_WEB_URL}/${DIRECTORY_B64}/session/${SESSION_ID}" >> "$GITHUB_OUTPUT"
+          if [[ "$OPENCODE_V2" == 1 ]]; then
+            SESSION_URL="$(node --input-type=module -e "import { v2SessionUrl } from '$RUNTIME_DIR/scripts/opencode-v2-api.mjs';console.log(v2SessionUrl(process.argv[1],process.argv[2]))" "$OPENCODE_WEB_URL" "$SESSION_ID")"
+          else
+            DIRECTORY_B64="$(printf '%s' "$PROJECT_DIR" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+            SESSION_URL="${OPENCODE_WEB_URL}/${DIRECTORY_B64}/session/${SESSION_ID}"
+          fi
+          printf 'session_id=%s\nsession_url=%s\n' "$SESSION_ID" "$SESSION_URL" >> "$GITHUB_OUTPUT"
 
 
       - name: Post temporary access details

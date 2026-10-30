@@ -36,7 +36,7 @@ test('registers connectivity without duplicating publication state', async t => 
   assert.equal(payload.urls.files, '')
 })
 
-test('registers the OpenCode 2 origin-based session URL', async t => {
+test('registers the OpenCode 2 browser pairing page', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'run-register-v2-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   writeFileSync(join(dir, 'web-url'), 'https://control.test')
@@ -46,6 +46,6 @@ test('registers the OpenCode 2 origin-based session URL', async t => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => server.close())
   await registerRun({ OPENCODE_V2: '1', OPENCODE_WEB_DIR: dir, PROJECT_DIR: '/not/the/server/origin', GITHUB_RUN_ID: '7', GITHUB_REPOSITORY: 'alice/game', TRIGGER_ISSUE_NUMBER: '2', OMGITHUB_ORIGIN: `http://127.0.0.1:${server.address().port}` }, undefined, async () => true)
-  assert.equal(payload.urls.opencode, `https://control.test/server/${Buffer.from('https://control.test').toString('base64url')}/session/ses_main`)
+  assert.equal(payload.urls.opencode, 'https://control.test/omgithub/connect')
   assert.equal(payload.state, 'live')
 })

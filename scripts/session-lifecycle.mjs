@@ -1,4 +1,4 @@
-import { createV2Client } from './opencode-v2-api.mjs'
+import { createV2Client, v2SessionUrl } from './opencode-v2-api.mjs'
 import { V2LifecycleBridge, isV2MainInterrupt, isV2MainPrompt } from './session-lifecycle-v2.mjs'
 import { SessionRecovery } from './session-recovery.mjs'
 import { registerRun } from './run-record.mjs'
@@ -199,6 +199,16 @@ async function serve() {
   let messageGate = Promise.resolve()
   const proxy = createServer(async (req, res) => {
     try {
+      if (v2 && req.method === 'GET' && req.url === '/omgithub/connect') {
+        const origin = readFileSync(join(directory, 'web-url'), 'utf8').trim()
+        const session = v2SessionUrl(origin, mainID())
+        const pair = await v2api.pair()
+        if (!/^[A-Za-z0-9_-]+$/.test(pair.code || '')) throw new Error('Invalid pairing code')
+        res.setHeader('content-type', 'text/html; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(`<!doctype html><meta name="viewport" content="width=device-width"><title>Connect OpenCode</title><h1>Connect OpenCode</h1><p><a href="${origin}/auth/connect/${pair.code}" target="_blank" rel="noopener">1. Pair this browser</a></p><p>After pairing, return here.</p><p><a href="${session}">2. Open the session</a></p>`)
+        return
+      }
       if (req.url === '/omgithub/heartbeat') { await heartbeat(); res.end('ok'); return }
       if (req.url === '/omgithub/reconcile') { await reconcile(); res.end('ok'); return }
       if (req.url === '/omgithub/deployment') { res.setHeader('content-type', 'application/json'); res.end(readFileSync(join(directory, 'deployment-status.json'), 'utf8')); return }

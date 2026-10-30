@@ -79,3 +79,12 @@ test('build a V2 deep link from the public origin instead of the local server', 
   for (const value of [`${origin}/path`, `${origin}?x=1`, 'ftp://example.com']) assert.throws(() => v2SessionUrl(value, 'ses_abc123'), /public origin/)
   assert.throws(() => v2SessionUrl(origin, 'msg_abc'), /session ID/)
 })
+
+test('request a fresh V2 browser pairing code', async () => {
+  let call
+  const api = createV2Client({ base: 'http://localhost:4096', password: 'local', request: async (url, options) => { call = { url, options }; return new Response(JSON.stringify({ code: 'pair123' })) } })
+  assert.equal((await api.pair()).code, 'pair123')
+  assert.equal(call.url.pathname, '/api/pair')
+  assert.equal(call.options.method, 'POST')
+  assert.deepEqual(JSON.parse(call.options.body), {})
+})
