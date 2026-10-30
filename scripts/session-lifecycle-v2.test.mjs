@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { V2LifecycleBridge, isV2MainPrompt } from './session-lifecycle-v2.mjs'
+import { V2LifecycleBridge, isV2MainInterrupt, isV2MainPrompt } from './session-lifecycle-v2.mjs'
 
 const sid = 'ses_main'
 const event = name => ({ type: `session.execution.${name}`, data: { sessionID: sid } })
@@ -12,6 +12,8 @@ test('gate main prompts before sending and ignore child-session traffic', () => 
   assert.equal(isV2MainPrompt('GET', `/api/session/${sid}/prompt`, sid), false)
   assert.equal(isV2MainPrompt('POST', '/api/session/ses_child/prompt', sid), false)
   assert.equal(isV2MainPrompt('POST', `/api/session/${sid}/interrupt`, sid), false)
+  assert.equal(isV2MainInterrupt('POST', `/api/session/${sid}/interrupt`, sid), true)
+  assert.equal(isV2MainInterrupt('POST', '/api/session/ses_child/interrupt', sid), false)
 })
 
 test('drain validation once before a prompt, then complete the observed main session', async () => {
@@ -56,4 +58,19 @@ test('reconnecting to an active main session invalidates prior validation', asyn
   await bridge.reconcile()
   assert.equal(busy, 1)
   assert.equal(complete, 0)
+})
+
+test('save a manually interrupted main session but not a stop superseded by a prompt', async () => {
+  const calls = []
+  const stopped = { id: sid, busy: false, messages: [{ type: 'idle', outcome: 'interrupted' }, { type: 'assistant', id: 'msg_stop', error: { type: 'aborted' } }] }
+  const bridge = new V2LifecycleBridge({ api: { snapshot: async () => stopped }, lifecycle: { busy: async () => {}, complete: async id => { calls.push(id) } }, sessionID: sid })
+  await bridge.beforePrompt()
+  bridge.beforeInterrupt()
+  await bridge.observe(event('interrupted'))
+  assert.deepEqual(calls, ['msg_stop'])
+  await bridge.beforePrompt()
+  bridge.beforeInterrupt()
+  await bridge.beforePrompt()
+  await bridge.observe(event('interrupted'))
+  assert.deepEqual(calls, ['msg_stop'])
 })

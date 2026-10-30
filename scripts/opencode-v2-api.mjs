@@ -77,12 +77,13 @@ export function createV2Client({ base, password, request = fetch }) {
   }
 }
 
-export function finishedV2Message(snapshot) {
+export function finishedV2Message(snapshot, { allowInterrupted = false } = {}) {
   if (snapshot.busy || !Array.isArray(snapshot.messages)) return null
   const first = snapshot.messages.find(message => ['idle', 'assistant', 'user'].includes(message.type))
-  if (first?.type !== 'idle' || first.outcome !== 'succeeded') return null
+  if (first?.type !== 'idle' || !['succeeded', ...(allowInterrupted ? ['interrupted'] : [])].includes(first.outcome)) return null
   const latest = snapshot.messages.find(message => message.type === 'assistant' || message.type === 'user')
-  return latest?.type === 'assistant' && !latest.error && messagePattern.test(latest.id || '') ? latest.id : null
+  const validOutcome = first.outcome === 'succeeded' ? !latest?.error : latest?.error?.type === 'aborted'
+  return latest?.type === 'assistant' && validOutcome && messagePattern.test(latest.id || '') ? latest.id : null
 }
 
 export function validateV2Session(session) {
