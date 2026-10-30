@@ -57,6 +57,7 @@ echo "Selected model: $model"
 session="$(node -e 'const fs=require("fs");for(const s of fs.readFileSync(process.argv[1],"utf8").split("\n")){try{const x=JSON.parse(s);if(x.sessionID){console.log(x.sessionID);break}}catch{}}' "$work/run.jsonl")"
 [[ "$session" == ses_* ]] || { echo 'Missing session ID' >&2; exit 1; }
 echo "Session: $session"
+printf '%s\n' "$session" > "$work/session-id"
 bounded "$bin" run --server "http://127.0.0.1:$port" --session "$session" --auto --model "$model" --format json 'What exact text did you write to the file? Reply with only that text. Do not use tools.' > "$work/follow.jsonl"
 node -e 'const fs=require("fs");const a=fs.readFileSync(process.argv[1],"utf8").split("\n").flatMap(s=>{try{return [JSON.parse(s)]}catch{return []}});if(!a.some(x=>x.type==="text"&&x.part?.text?.includes("ACTIONS_V2_OK")))throw Error("Follow-up did not retain the conversation");console.log("Follow-up retained conversation")' "$work/follow.jsonl"
 timed node "$script_dir/v2-experiment-api.mjs" "$session" "$work/fork-id"

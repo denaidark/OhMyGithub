@@ -26,6 +26,7 @@ Follow live logs with `bash scripts/ssh-run-log.sh <run-id> --repo lasseondev/om
 - Check `/api/info` with Basic auth; `/global/health` returns the web app.
 - Use `/api/session/*` with `{ data }` responses; V1 paths return HTML.
 - Build session links as `<origin>/server/<base64url(origin)>/session/<id>`.
+- Pair browsers with `POST /api/pair`, then open `<origin>/auth/connect/<code>`; the session page shows an empty shell until pairing.
 - Save exports through `/api/experimental/session/<id>/export`.
 - Expect `idle` markers with `succeeded`, `interrupted`, or failure outcomes.
 - Treat a user stop as `interrupted` with an `aborted` assistant error.
