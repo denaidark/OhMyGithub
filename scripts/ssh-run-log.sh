@@ -74,8 +74,8 @@ exec ssh -o StrictHostKeyChecking=no \
   -o ConnectTimeout=20 \
   -i "$key" -p "$port" "runner@${host}" \
   'set -e
-   diag_root="$HOME/actions-runner/cached"
-   diag="$(find "$diag_root" -mindepth 2 -maxdepth 3 -type d -path "*/_diag/pages" -print | sort | tail -n 1)"
+   diag_root="$HOME/actions-runner"
+   diag="$(find "$diag_root" -mindepth 3 -maxdepth 4 -type d -path "*/_diag/pages" -print | sort | tail -n 1)"
    [[ -n "$diag" ]] || { echo "No Actions diagnostics directory found." >&2; exit 1; }
    log="$(find "$diag" -type f -name "*_1.log" -size +0c -print -quit)"
    [[ -n "$log" ]] || { echo "No non-empty Actions page log found." >&2; exit 1; }
