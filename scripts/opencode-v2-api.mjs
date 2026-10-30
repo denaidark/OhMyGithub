@@ -86,6 +86,9 @@ export function finishedV2Message(snapshot, { allowInterrupted = false } = {}) {
   const first = snapshot.messages.find(message => ['idle', 'assistant', 'user'].includes(message.type))
   if (first?.type !== 'idle' || !['succeeded', ...(allowInterrupted ? ['interrupted'] : [])].includes(first.outcome)) return null
   const latest = snapshot.messages.find(message => message.type === 'assistant' || message.type === 'user')
+  // V2 can interrupt before the assistant message exists. Keep the user prompt
+  // checkpointable, as V1 does when a response is aborted.
+  if (first.outcome === 'interrupted') return messagePattern.test(latest?.id || '') ? latest.id : null
   // A stopped turn is terminal once the idle marker says interrupted; the
   // projected assistant may carry an aborted error or none at all.
   const validOutcome = first.outcome === 'succeeded' ? !latest?.error : true

@@ -50,7 +50,8 @@ test('handle busy sessions and validate V2 transcript structure', () => {
   assert.equal(finishedV2Message(stopped), null)
   assert.equal(finishedV2Message(stopped, { allowInterrupted: true }), 'msg_stop')
   assert.equal(finishedV2Message({ ...stopped, messages: [stopped.messages[0], { type: 'assistant', id: 'msg_plain' }] }, { allowInterrupted: true }), 'msg_plain')
-  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle', outcome: 'interrupted' }, { type: 'user', id: 'msg_user' }] }, { allowInterrupted: true }), null)
+  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle', outcome: 'interrupted' }, { type: 'user', id: 'msg_user' }] }, { allowInterrupted: true }), 'msg_user')
+  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle', outcome: 'interrupted' }] }, { allowInterrupted: true }), null)
   const transcript = { info: { id: 'ses_123' }, messages: [{ type: 'user' }, { type: 'assistant' }, { type: 'idle' }] }
   assert.equal(validateV2Session(transcript), transcript)
   assert.throws(() => validateV2Session({ ...transcript, info: { id: 'ses_123', fork: { sessionID: 'ses_parent' } } }), /main-session/)
