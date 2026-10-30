@@ -79,6 +79,8 @@ export function createV2Client({ base, password, request = fetch }) {
 
 export function finishedV2Message(snapshot) {
   if (snapshot.busy || !Array.isArray(snapshot.messages)) return null
+  const first = snapshot.messages.find(message => ['idle', 'assistant', 'user'].includes(message.type))
+  if (first?.type !== 'idle' || first.outcome !== 'succeeded') return null
   const latest = snapshot.messages.find(message => message.type === 'assistant' || message.type === 'user')
   return latest?.type === 'assistant' && !latest.error && messagePattern.test(latest.id || '') ? latest.id : null
 }

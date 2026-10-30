@@ -20,7 +20,7 @@ test('send V2 requests with the documented paths, payloads and wrapped responses
   const calls = []
   const request = async (url, options) => {
     calls.push({ path: url.pathname, ...options })
-    const data = url.pathname.endsWith('/message') ? [{ id: 'msg_new', type: 'assistant' }] :
+    const data = url.pathname.endsWith('/message') ? [{ type: 'idle', outcome: 'succeeded' }, { id: 'msg_new', type: 'assistant' }] :
       url.pathname.endsWith('/active') ? {} : { id: 'ses_child' }
     return new Response(JSON.stringify({ data }), { status: 200 })
   }
@@ -42,7 +42,8 @@ test('send V2 requests with the documented paths, payloads and wrapped responses
 test('handle busy sessions and validate V2 transcript structure', () => {
   assert.equal(finishedV2Message({ busy: true, messages: [{ id: 'msg_1', type: 'assistant' }] }), null)
   assert.equal(finishedV2Message({ busy: false, messages: [{ id: 'msg_user', type: 'user' }, { id: 'msg_old', type: 'assistant' }] }), null)
-  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle' }, { id: 'msg_new', type: 'assistant' }, { id: 'msg_old', type: 'assistant' }] }), 'msg_new')
+  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle', outcome: 'failed' }, { id: 'msg_old', type: 'assistant' }] }), null)
+  assert.equal(finishedV2Message({ busy: false, messages: [{ type: 'idle', outcome: 'succeeded' }, { id: 'msg_new', type: 'assistant' }, { id: 'msg_old', type: 'assistant' }] }), 'msg_new')
   const transcript = { info: { id: 'ses_123' }, messages: [{ type: 'user' }, { type: 'assistant' }, { type: 'idle' }] }
   assert.equal(validateV2Session(transcript), transcript)
   assert.throws(() => validateV2Session({ ...transcript, info: { id: 'ses_123', fork: { sessionID: 'ses_parent' } } }), /main-session/)
