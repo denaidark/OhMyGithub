@@ -4,6 +4,9 @@ set -euo pipefail
 timed() { local start=$SECONDS; "$@"; local rc=$?; printf '[timing] %s: %ss\n' "$1" "$((SECONDS-start))" >&2; return "$rc"; }
 work="$RUNNER_TEMP/omgithub-v2"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Actions page logs rotate at 20 KB. Mirror this step so a failed hosted run
+# stays inspectable over SSH.
+exec > >(tee -a "$RUNNER_TEMP/v2-experiment.log") 2>&1
 bounded() { python3 "$script_dir/v2-experiment-bounded.py" "${BOUND_SECONDS:-120}" "$@"; }
 timed mkdir -p "$work/home" "$work/config" "$work/data" "$work/cache" "$work/restore-home" "$work/restore-data" "$work/restore-config" "$work/restore-cache"
 export HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/data" XDG_CACHE_HOME="$work/cache"
