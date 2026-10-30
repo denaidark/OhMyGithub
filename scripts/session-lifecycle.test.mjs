@@ -144,11 +144,26 @@ test('abort kills descendants retaining the worker stderr pipe', async () => {
   } finally { controller.abort(); await rejection; rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('V2 pairing page gives an embedded browser an unconsumed link and session', async () => {
+test('V2 bootstrap redeems in the embedded origin, retains other servers, and retries failures', async () => {
   const { v2PairPage } = await import('./session-lifecycle.mjs')
-  const html = v2PairPage('https://control.test', 'ses_main', 'pair_123')
-  assert.match(html, /value="https:\/\/control\.test\/auth\/connect\/pair_123"/)
-  assert.match(html, /paste the link into the connection prompt/)
-  assert.match(html, /\/session\/ses_main/)
-  assert.throws(() => v2PairPage('https://control.test', 'ses_main', '<bad>'), /pairing code/)
+  const { runInNewContext } = await import('node:vm')
+  const html = v2PairPage('https://control.test', 'ses_main')
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
+  const elements = { status: {}, retry: {} }
+  const data = new Map([['opencode.global.dat:server', JSON.stringify({ list: [{ type: 'http', http: { url: 'https://other.test' } }], hidden: {} })]])
+  const calls = [], target = []
+  const context = { AbortSignal, document: { getElementById: id => elements[id] },
+    localStorage: { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) },
+    location: { origin: 'https://control.test', replace: url => target.push(url) },
+    fetch: async (url, options) => { calls.push([url, options]); return { ok: true, json: async () => url === '/omgithub/pair' ? { code: 'pair_123' } : { token: 'session-token' } } } }
+  await runInNewContext(script, context)
+  assert.deepEqual(calls.map(call => call[0]), ['/omgithub/pair', '/auth/connect/pair_123'])
+  const state = JSON.parse(data.get('opencode.global.dat:server'))
+  assert.equal(state.list.length, 2)
+  assert.equal(state.list[1].http.password, 'session-token')
+  assert.match(target[0], /\/session\/ses_main$/)
+  context.fetch = async () => ({ ok: false })
+  await runInNewContext(script, context)
+  assert.equal(elements.retry.hidden, false)
+  assert.equal(typeof elements.retry.onclick, 'function')
 })

@@ -142,11 +142,39 @@ export function finishedMessage(current) {
   return last.id
 }
 
-export function v2PairPage(origin, sessionID, code) {
+export function v2PairPage(origin, sessionID) {
   const session = v2SessionUrl(origin, sessionID)
-  if (!/^[A-Za-z0-9_-]+$/.test(code || '')) throw new Error('Invalid pairing code')
-  const pair = `${new URL(origin).origin}/auth/connect/${code}`
-  return `<!doctype html><meta name="viewport" content="width=device-width"><title>Connect OpenCode</title><h1>Connect OpenCode</h1><p>1. Copy this pairing link:</p><input aria-label="Pairing link" readonly value="${pair}" style="width:95%" onclick="this.select()"><p>2. Open the session and paste the link into the connection prompt.</p><p><a href="${session}">Open the session</a></p>`
+  // OpenCode 2.2.2's web client persists its server registry in this key.
+  // Redeem in the embedded origin so storage partitioning matches the chat.
+  return `<!doctype html><meta name="viewport" content="width=device-width"><title>Connecting OpenCode</title>
+    <p id="status" role="status">Connecting OpenCode…</p><button id="retry" hidden>Retry connection</button>
+    <script>
+    (async function connect() {
+      const status = document.getElementById('status'), retry = document.getElementById('retry');
+      retry.hidden = true; status.textContent = 'Connecting OpenCode…';
+      try {
+        const pairResponse = await fetch('/omgithub/pair', { cache: 'no-store', signal: AbortSignal.timeout(12000) });
+        if (!pairResponse.ok) throw new Error('Pairing unavailable');
+        const { code } = await pairResponse.json();
+        if (!/^[A-Za-z0-9_-]+$/.test(code || '')) throw new Error('Invalid pairing code');
+        const response = await fetch('/auth/connect/' + encodeURIComponent(code), { headers: { accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(12000) });
+        if (!response.ok) throw new Error('Pairing failed');
+        const { token } = await response.json();
+        if (typeof token !== 'string' || !token) throw new Error('Missing pairing token');
+        const key = 'opencode.global.dat:server';
+        let state = {}; try { state = JSON.parse(localStorage.getItem(key) || '{}'); } catch {}
+        if (!state || typeof state !== 'object' || Array.isArray(state)) state = {};
+        const list = Array.isArray(state.list) ? state.list : [];
+        state.list = list.filter(item => item?.http?.url !== location.origin && item?.url !== location.origin && item !== location.origin);
+        state.list.push({ type: 'http', http: { url: location.origin, password: token } });
+        localStorage.setItem(key, JSON.stringify(state));
+        location.replace(${JSON.stringify(session)});
+      } catch {
+        status.textContent = 'Could not connect to OpenCode.';
+        retry.hidden = false; retry.onclick = connect;
+      }
+    })();
+    </script>`
 }
 
 async function serve() {
@@ -208,11 +236,18 @@ async function serve() {
     try {
       if (v2 && req.method === 'GET' && req.url === '/omgithub/connect') {
         const origin = readFileSync(join(directory, 'web-url'), 'utf8').trim()
-        const pair = await v2api.pair()
-        const page = v2PairPage(origin, mainID(), pair.code)
+        const page = v2PairPage(origin, mainID())
         res.setHeader('content-type', 'text/html; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
         res.end(page)
+        return
+      }
+      if (v2 && req.method === 'GET' && req.url === '/omgithub/pair') {
+        const pair = await v2api.pair()
+        if (!/^[A-Za-z0-9_-]+$/.test(pair.code || '')) throw new Error('Invalid pairing code')
+        res.setHeader('content-type', 'application/json')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({ code: pair.code }))
         return
       }
       if (req.url === '/omgithub/heartbeat') { await heartbeat(); res.end('ok'); return }
