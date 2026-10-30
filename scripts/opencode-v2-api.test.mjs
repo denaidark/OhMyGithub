@@ -21,7 +21,7 @@ test('send V2 requests with the documented paths, payloads and wrapped responses
   const request = async (url, options) => {
     calls.push({ path: url.pathname, ...options })
     const data = url.pathname.endsWith('/message') ? [{ type: 'idle', outcome: 'succeeded' }, { id: 'msg_new', type: 'assistant' }] :
-      url.pathname.endsWith('/active') ? {} : { id: 'ses_child' }
+      url.pathname.endsWith('/active') ? {} : url.pathname.endsWith('/export') ? { info: { id: 'ses_main' }, messages: [{ type: 'user' }] } : { id: 'ses_child' }
     return new Response(JSON.stringify({ data }), { status: 200 })
   }
   const client = createV2Client({ base: 'http://localhost:4096', password: 'local', request })
@@ -31,6 +31,8 @@ test('send V2 requests with the documented paths, payloads and wrapped responses
   assert.deepEqual(JSON.parse(calls.at(-1).body), { before: 'msg_123' })
   await client.interrupt('ses_main')
   assert.equal(calls.at(-1).path, '/api/session/ses_main/interrupt')
+  assert.equal((await client.export('ses_main')).info.id, 'ses_main')
+  assert.equal(calls.at(-1).path, '/api/experimental/session/ses_main/export')
   const snapshot = await client.snapshot('ses_main')
   assert.equal(snapshot.busy, false)
   assert.equal(finishedV2Message(snapshot), 'msg_new')

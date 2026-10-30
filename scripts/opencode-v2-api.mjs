@@ -40,6 +40,10 @@ export function createV2Client({ base, password, request = fetch }) {
     async session(id) { return (await call(pathFor(id))).data },
     async messages(id) { return (await call(pathFor(id, '/message'))).data },
     async active() { return (await call('/api/session/active')).data },
+    async export(id) {
+      if (!idPattern.test(id)) throw new Error('Invalid session ID')
+      return validateV2Session((await call(`/api/experimental/session/${id}/export`)).data)
+    },
     async prompt(id, text) {
       if (typeof text !== 'string' || !text.trim()) throw new Error('Require a prompt')
       return (await call(pathFor(id, '/prompt'), { method: 'POST', body: { text } })).data
