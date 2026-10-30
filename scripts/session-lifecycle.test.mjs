@@ -143,3 +143,12 @@ test('abort kills descendants retaining the worker stderr pipe', async () => {
     } catch (error) { if (!['ESRCH', 'ENOENT'].includes(error.code)) throw error }
   } finally { controller.abort(); await rejection; rmSync(directory, { recursive: true, force: true }) }
 })
+
+test('V2 pairing page gives an embedded browser an unconsumed link and session', async () => {
+  const { v2PairPage } = await import('./session-lifecycle.mjs')
+  const html = v2PairPage('https://control.test', 'ses_main', 'pair_123')
+  assert.match(html, /value="https:\/\/control\.test\/auth\/connect\/pair_123"/)
+  assert.match(html, /paste the link into the connection prompt/)
+  assert.match(html, /\/session\/ses_main/)
+  assert.throws(() => v2PairPage('https://control.test', 'ses_main', '<bad>'), /pairing code/)
+})

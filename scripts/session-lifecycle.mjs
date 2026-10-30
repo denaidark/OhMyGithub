@@ -142,6 +142,13 @@ export function finishedMessage(current) {
   return last.id
 }
 
+export function v2PairPage(origin, sessionID, code) {
+  const session = v2SessionUrl(origin, sessionID)
+  if (!/^[A-Za-z0-9_-]+$/.test(code || '')) throw new Error('Invalid pairing code')
+  const pair = `${new URL(origin).origin}/auth/connect/${code}`
+  return `<!doctype html><meta name="viewport" content="width=device-width"><title>Connect OpenCode</title><h1>Connect OpenCode</h1><p>1. Copy this pairing link:</p><input aria-label="Pairing link" readonly value="${pair}" style="width:95%" onclick="this.select()"><p>2. Open the session and paste the link into the connection prompt.</p><p><a href="${session}">Open the session</a></p>`
+}
+
 async function serve() {
   const env = process.env, directory = env.OPENCODE_WEB_DIR
   recordChildren = () => {
@@ -201,12 +208,11 @@ async function serve() {
     try {
       if (v2 && req.method === 'GET' && req.url === '/omgithub/connect') {
         const origin = readFileSync(join(directory, 'web-url'), 'utf8').trim()
-        const session = v2SessionUrl(origin, mainID())
         const pair = await v2api.pair()
-        if (!/^[A-Za-z0-9_-]+$/.test(pair.code || '')) throw new Error('Invalid pairing code')
+        const page = v2PairPage(origin, mainID(), pair.code)
         res.setHeader('content-type', 'text/html; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
-        res.end(`<!doctype html><meta name="viewport" content="width=device-width"><title>Connect OpenCode</title><h1>Connect OpenCode</h1><p><a href="${origin}/auth/connect/${pair.code}" target="_blank" rel="noopener">1. Pair this browser</a></p><p>After pairing, return here.</p><p><a href="${session}">2. Open the session</a></p>`)
+        res.end(page)
         return
       }
       if (req.url === '/omgithub/heartbeat') { await heartbeat(); res.end('ok'); return }
