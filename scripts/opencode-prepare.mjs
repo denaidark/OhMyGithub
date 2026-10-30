@@ -63,7 +63,7 @@ export async function prepareRequest(event, env, fetcher = fetch) {
     if (!['write', 'maintain', 'admin'].includes(permission.permission)) throw new Error('The issue author needs write, maintain, or admin access. Set OPENCODE_ACCESS=everyone to accept all authors.');
   }
   const parsed = parseIssueRequest(issue, repo.default_branch);
-  if (parsed.branchError || !parsed.request || !parsed.title) throw new Error(parsed.branchError || 'Supply an issue title and request.');
+  if (parsed.branchError || parsed.versionError || !parsed.request || !parsed.title) throw new Error(parsed.branchError || parsed.versionError || 'Supply an issue title and request.');
   const branch = await api(`/branches/${encodeURIComponent(parsed.targetRef)}`);
   if (!/^[a-f0-9]{40}$/.test(branch.commit?.sha || '')) throw new Error('The target branch has no valid commit.');
   if (env.GITHUB_REF !== `refs/heads/${parsed.targetRef}`) {
@@ -73,7 +73,7 @@ export async function prepareRequest(event, env, fetcher = fetch) {
     });
     return { approved: 'false', redispatched: 'true' };
   }
-  return { approved: 'true', issue_number: String(number), request: parsed.request, issue_title: parsed.title, sender, labels_json: JSON.stringify(labels), target_ref: parsed.targetRef, target_sha: branch.commit.sha };
+  return { approved: 'true', issue_number: String(number), request: parsed.request, opencode_version: parsed.opencodeVersion, issue_title: parsed.title, sender, labels_json: JSON.stringify(labels), target_ref: parsed.targetRef, target_sha: branch.commit.sha };
 }
 
 export async function prepare(env = process.env, fetcher = fetch) {

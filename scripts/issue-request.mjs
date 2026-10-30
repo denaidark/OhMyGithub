@@ -5,7 +5,9 @@ export function parseIssueRequest(issue, defaultBranch = 'main') {
   try { metadata = JSON.parse(body.match(/<!-- omgithub-request:v1 (\{[^\n]*\}) -->/)?.[1] || '{}') } catch {}
   const requestBody = body.replace(/<!-- omgithub-request:v1 \{[^\n]*\} -->/g, '').trim()
   const requestTitle = title
-  if (typeof metadata.branch !== 'string') return { request: requestBody || title, title, targetRef: defaultBranch, branchSpecified: false, branchError: '' }
+  const opencodeVersion = metadata.opencode_version === undefined ? '2' : String(metadata.opencode_version)
+  const versionError = ['1', '2'].includes(opencodeVersion) ? '' : 'Invalid OpenCode version metadata.'
+  if (typeof metadata.branch !== 'string') return { request: requestBody || title, title, targetRef: defaultBranch, branchSpecified: false, branchError: '', opencodeVersion, versionError }
   const targetRef = metadata.branch.trim()
   const invalid = !targetRef || targetRef.length > 255 || targetRef === '@' || targetRef.startsWith('-') ||
     targetRef.startsWith('/') || targetRef.endsWith('/') || targetRef.endsWith('.') || targetRef.endsWith('.lock') ||
@@ -16,6 +18,7 @@ export function parseIssueRequest(issue, defaultBranch = 'main') {
     title: requestTitle,
     targetRef: invalid ? defaultBranch : targetRef,
     branchSpecified: true,
+    opencodeVersion, versionError,
     branchError: invalid ? 'Invalid branch metadata.' : ''
   }
 }

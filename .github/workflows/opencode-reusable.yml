@@ -11,6 +11,11 @@ on:
         description: Exact issue request text
         required: true
         type: string
+      opencode_version:
+        description: OpenCode major version for new sessions
+        required: false
+        default: '2'
+        type: string
       issue_title:
         description: Issue title for reporting
         required: true
@@ -63,7 +68,7 @@ jobs:
       PROJECT_DIR: ${{ github.workspace }}/${{ vars.PROJECT_DIR || './' }}
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      OPENCODE_V2_REQUESTED: ${{ vars.OPENCODE_V2 }}
+      OPENCODE_VERSION_REQUESTED: ${{ inputs.opencode_version }}
       OPENCODE_AUTH_CONTENT: ${{ secrets.OPENCODE_AUTH_JSON }}
       OPENCODE_EXPERIMENTAL: "true"
       OPENCODE_EXPERIMENTAL_WORKSPACES: "true"
@@ -209,9 +214,10 @@ jobs:
           v2=0
           if [[ -n "${RESUME_OPENCODE_VERSION:-}" ]]; then
             [[ "$RESUME_OPENCODE_VERSION" == 2.* ]] && v2=1
-          elif [[ "${OPENCODE_V2_REQUESTED:-}" == '1' && "$TEST_REQUEST" != 'true' ]]; then
+          elif [[ "${OPENCODE_VERSION_REQUESTED:-2}" == '2' && "$TEST_REQUEST" != 'true' ]]; then
             v2=1
           fi
+          [[ "${OPENCODE_VERSION_REQUESTED:-2}" == '1' || "${OPENCODE_VERSION_REQUESTED:-2}" == '2' ]] || { echo 'Invalid OpenCode version' >&2; exit 1; }
           printf 'OPENCODE_V2=%s\n' "$v2" >> "$GITHUB_ENV"
           if [[ "$v2" == '1' ]]; then
             password="$(openssl rand -hex 24)"
