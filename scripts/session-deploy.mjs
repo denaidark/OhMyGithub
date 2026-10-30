@@ -1,3 +1,4 @@
+import { createV2Client } from './opencode-v2-api.mjs'
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
@@ -11,6 +12,8 @@ const env = process.env
 const evidence = join(env.RUNNER_TEMP, `validation-${env.CHECKPOINT_GENERATION}`)
 const project = env.PROJECT_DIR
 const base = `http://127.0.0.1:${env.OPENCODE_WEB_PORT}`
+const v2 = env.OPENCODE_V2 === '1'
+const v2api = v2 ? createV2Client({ base, password: env.OPENCODE_PASSWORD }) : null
 const main = readFileSync(join(env.OPENCODE_WEB_DIR, 'checkpoint-session-id'), 'utf8').trim()
 const api = async (path, options = {}, workingDirectory = env.PROJECT_DIR) => {
   const response = await fetch(`${base}${path}`, { ...options, headers: { 'content-type': 'application/json', 'x-opencode-directory': workingDirectory }, signal: AbortSignal.timeout(30000) })
@@ -18,7 +21,7 @@ const api = async (path, options = {}, workingDirectory = env.PROJECT_DIR) => {
   return response.json()
 }
 let fork
-async function abort() { if (fork) await api(`/session/${fork.id}/abort`, { method: 'POST' }, project) }
+async function abort() { if (fork) { if (v2) await v2api.interrupt(fork.id); else await api(`/session/${fork.id}/abort`, { method: 'POST' }, project) } }
 const controller = new AbortController()
 async function command(file, args) {
   const started = Date.now()
@@ -30,11 +33,12 @@ try {
   mkdirSync(evidence, { recursive: true })
   const runFork = async prompt => {
     if (!fork) {
-      fork = await api(`/session/${main}/fork`, { method: 'POST', body: JSON.stringify({ messageID: env.MAIN_MESSAGE_ID }) })
+      fork = v2 ? await v2api.fork(main) : await api(`/session/${main}/fork`, { method: 'POST', body: JSON.stringify({ messageID: env.MAIN_MESSAGE_ID }) })
       if (!fork.id?.startsWith('ses_')) throw new Error('No repair fork created')
       writeFileSync(join(env.OPENCODE_WEB_DIR, 'active-validation.json'), JSON.stringify({ id: fork.id, directory: project }))
     }
-    await child(env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode'), ['run', '--auto', '--dangerously-skip-permissions', '--attach', base, '--dir', project, '--session', fork.id, '--model', readFileSync(join(env.OPENCODE_WEB_DIR, 'main-model'), 'utf8').trim(), prompt], { signal: controller.signal, cwd: project })
+    const connection = v2 ? ['--server', base] : ['--dangerously-skip-permissions', '--attach', base, '--dir', project]
+    await child(env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode'), ['run', '--auto', ...connection, '--session', fork.id, '--model', readFileSync(join(env.OPENCODE_WEB_DIR, 'main-model'), 'utf8').trim(), prompt], { signal: controller.signal, cwd: project })
   }
   const { repaired } = await preparePreview({ env, evidence, signal: controller.signal, repair: runFork })
   if (repaired) {

@@ -1,3 +1,4 @@
+import { v2SessionUrl } from './opencode-v2-api.mjs'
 import { readyPublicUrls } from './public-readiness.mjs'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -11,7 +12,7 @@ export async function registerRun(env, state, check) {
   const web = read('web-url'), preview = read('ready-preview-url'), session = read('checkpoint-session-id')
   const body = { run: env.GITHUB_RUN_ID, attempt: Number(env.GITHUB_RUN_ATTEMPT || 1), sequence: (lastSequence = Math.max(Date.now(), lastSequence + 1)),
     state: state || (session && web ? 'live' : 'starting'), session_id: session,
-    urls: { opencode: session && web ? `${web}/${Buffer.from(env.PROJECT_DIR).toString('base64url')}/session/${session}` : '',
+    urls: { opencode: session && web ? (env.OPENCODE_V2 === '1' ? v2SessionUrl(web, session) : `${web}/${Buffer.from(env.PROJECT_DIR).toString('base64url')}/session/${session}`) : '',
       files: read('files-url'), preview,
       branch: `https://github.com/${env.GITHUB_REPOSITORY}/tree/opencode-checkpoints/${env.TRIGGER_ISSUE_NUMBER}` } }
   body.urls = await readyPublicUrls(body.urls, check)
