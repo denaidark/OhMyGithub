@@ -214,3 +214,33 @@ test('restore cross-repository conversation against the imported snapshot withou
   assert.throws(() => usesImportedSnapshot(source, base, { SNAPSHOT_SOURCE_REPOSITORY: 'other/game', SNAPSHOT_SOURCE_COMMIT: base.commit }), /does not match/)
   assert.throws(() => usesImportedSnapshot(source, base, { SNAPSHOT_SOURCE_REPOSITORY: 'alice/game', SNAPSHOT_SOURCE_COMMIT: 'b'.repeat(40) }), /does not match/)
 })
+
+test('validate and round-trip V2 checkpoints with the V2 CLI contract', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'checkpoint-v2-'))
+  const original = { ...process.env }
+  const bin = join(directory, 'opencode'), state = join(directory, 'session.json'), calls = join(directory, 'calls')
+  const v2 = { info: { id: 'ses_checkpoint', location: { directory } }, messages: [{ type: 'user', id: 'msg_one', content: [{ type: 'text', text: 'Build a castle' }] }, { type: 'idle', outcome: 'succeeded' }] }
+  try {
+    const fixture = { ...base, opencode_version: '2.2.2', session: v2 }
+    assert.equal(validateCheckpoint(fixture, source), fixture)
+    assert.throws(() => validateCheckpoint({ ...fixture, opencode_version: '1.2.3' }, source), /complete/)
+    assert.throws(() => validateCheckpoint({ ...fixture, session: { ...v2, messages: [{}] } }, source), /complete/)
+    assert.throws(() => validateCheckpoint({ ...fixture, session: { ...v2, info: { ...v2.info, fork: { sessionID: 'ses_parent' } } } }, source))
+    writeFileSync(bin, `#!/usr/bin/env node\nconst fs=require('fs'); const a=process.argv.slice(2); fs.appendFileSync(process.env.CALLS,JSON.stringify(a)+'\\n'); if(a[0]==='--version')process.stdout.write('opencode v2.2.2');else if(a[0]==='session'&&a[1]==='import')fs.copyFileSync(a[2],process.env.STATE);else if(a[0]==='session'&&a[1]==='export')process.stdout.write(fs.readFileSync(process.env.STATE));else process.exit(1);\n`, { mode: 0o755 })
+    Object.assign(process.env, { OPENCODE_BIN: bin, PROJECT_DIR: directory, RUNNER_TEMP: directory, STATE: state, CALLS: calls, GITHUB_ENV: join(directory, 'github-env'), RESUME_CHECKPOINT_FILE: join(directory, 'checkpoint.json'), OPENCODE_WEB_PORT: '4096' })
+    writeFileSync(process.env.RESUME_CHECKPOINT_FILE, JSON.stringify(fixture))
+    restore()
+    assert.deepEqual(JSON.parse(readFileSync(state)).messages, v2.messages)
+    assert.match(readFileSync(process.env.GITHUB_ENV, 'utf8'), /RESUME_SESSION_ID/)
+    assert.deepEqual(exportSession(bin, 'ses_checkpoint', directory, directory, '2.2.2').messages, v2.messages)
+    const commands = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(commands[1].slice(0, 2), ['session', 'import'])
+    assert.ok(commands[1].includes('--standalone'))
+    assert.ok(commands[2].includes('--standalone'))
+    assert.deepEqual(commands[3].slice(-2), ['--server', 'http://127.0.0.1:4096'])
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key]
+    Object.assign(process.env, original)
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

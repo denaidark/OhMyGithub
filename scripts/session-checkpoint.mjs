@@ -1,4 +1,5 @@
 import { gzipSync } from 'node:zlib'
+import { normalizeV2Version, validateV2Session } from './opencode-v2-api.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -19,11 +20,12 @@ export function command(file, args, options = {}) {
 }
 // OpenCode can exit before a piped stdout buffer drains. A regular file descriptor
 // makes large JSON exports synchronous at the CLI boundary instead of truncating them.
-export function exportSession(binary, sessionId, cwd, temporaryDirectory) {
+export function exportSession(binary, sessionId, cwd, temporaryDirectory, version = '1.0.0', standalone = false) {
   const file = join(temporaryDirectory, `session-export-${randomUUID()}.json`)
   const fd = openSync(file, 'wx', 0o600)
   try {
-    command(binary, ['export', sessionId], { cwd, stdio: ['ignore', fd, 'pipe'] })
+    const args = version.startsWith('2.') ? ['session', 'export', sessionId, ...(standalone ? ['--standalone'] : ['--server', `http://127.0.0.1:${env.OPENCODE_WEB_PORT}`])] : ['export', sessionId]
+    command(binary, args, { cwd, stdio: ['ignore', fd, 'pipe'] })
     return JSON.parse(readFileSync(file, 'utf8'))
   } finally { closeSync(fd); rmSync(file, { force: true }) }
 }
@@ -41,18 +43,28 @@ export function parseResume(request) {
   if (typeof source.user_prompt === 'string') return { ...source, prompt: source.user_prompt }
   return { ...source, prompt: String(request).replace(matches[0][0], '').replace(/<!-- omgithub-resume-request:[a-f0-9]+ -->/g, '').replace(/^Continue from https:\/\/github\.com\/[^\n]+\n?/gm, '').trim() }
 }
+export function normalizedVersion(output) {
+  return String(output).trim().startsWith('opencode v2.') ? normalizeV2Version(output) : String(output).trim()
+}
+export function validTranscript(session, version) {
+  if (version.startsWith('2.')) {
+    try { validateV2Session(session); return true } catch { return false }
+  }
+  return Array.isArray(session?.messages) && session.messages.length > 0 && session.messages.every(m => m.info?.id && ['user', 'assistant'].includes(m.info.role) && Array.isArray(m.parts))
+}
 export function validateCheckpoint(c, source) {
   if (!(c?.version === 2 && c.repository?.toLowerCase() === source.source_repository.toLowerCase() && c.issue_number === source.source_issue &&
       Number.isSafeInteger(c.run_id) && c.run_id > 0 && /^[a-f0-9]{40}$/.test(c.commit) && /^opencode-checkpoints\/[1-9]\d*$/.test(c.branch) &&
       typeof c.project_dir === 'string' && !c.project_dir.startsWith('/') && !c.project_dir.includes('\\') && !/[\r\n\0]/.test(c.project_dir) && !c.project_dir.split('/').includes('..') &&
       /^\d+\.\d+\.\d+$/.test(c.opencode_version) && c.public_history === true && /^ses_[a-zA-Z0-9]+$/.test(c.session?.info?.id || '') &&
-      Array.isArray(c.session?.messages) && c.session.messages.length > 0 && c.session.messages.every(m => m.info?.id && ['user', 'assistant'].includes(m.info.role) && Array.isArray(m.parts)))) throw new Error('No complete saved session is available.')
-  if (c.session.info.parentID) throw new Error('This checkpoint contains a verification fork. Select an earlier main-session checkpoint or start a new build.')
+      validTranscript(c.session, c.opencode_version))) throw new Error('No complete saved session is available.')
+  if (c.session.info.parentID || c.session.info.fork) throw new Error('This checkpoint contains a verification fork. Select an earlier main-session checkpoint or start a new build.')
   return c
 }
 export function portableSession(value) {
   const session = structuredClone(value)
   for (const message of session.messages || []) {
+    if (!Array.isArray(message.parts)) continue
     message.parts = message.parts.flatMap(part => {
       // Provider replay IDs, signatures and encrypted reasoning belong to the old
       // caller. Keep all readable transcript/tool content, not those opaque tokens.
@@ -146,9 +158,9 @@ export function prepare() {
 export function restore() {
   if (!env.RESUME_CHECKPOINT_FILE) return
   const checkpoint = JSON.parse(readFileSync(env.RESUME_CHECKPOINT_FILE, 'utf8'))
-  if (checkpoint.session?.info?.parentID) throw new Error('Cannot resume a verification fork. Select a main-session checkpoint.')
+  if (checkpoint.session?.info?.parentID || checkpoint.session?.info?.fork) throw new Error('Cannot resume a verification fork. Select a main-session checkpoint.')
   const binary = env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode')
-  const version = command(binary, ['--version'])
+  const version = normalizedVersion(command(binary, ['--version']))
   if (version !== checkpoint.opencode_version) throw new Error('Install the saved OpenCode version before importing.')
   const session = portableSession(checkpoint.session)
   session.info.directory = resolve(env.PROJECT_DIR)
@@ -156,11 +168,11 @@ export function restore() {
   const file = join(env.RUNNER_TEMP, 'omgithub-session-import.json')
   writeFileSync(file, JSON.stringify(session), { mode: 0o600 })
   try {
-    command(binary, ['import', file], { cwd: env.PROJECT_DIR })
+    command(binary, version.startsWith('2.') ? ['session', 'import', file, '--standalone', '--directory', resolve(env.PROJECT_DIR)] : ['import', file], { cwd: env.PROJECT_DIR })
     // Some CLI import errors exit zero. Prove all messages survived before submitting work.
-    const restored = exportSession(binary, session.info.id, env.PROJECT_DIR, env.RUNNER_TEMP)
+    const restored = exportSession(binary, session.info.id, env.PROJECT_DIR, env.RUNNER_TEMP, version, version.startsWith('2.'))
     if (restored.info?.id !== session.info.id || restored.messages?.length !== session.messages.length ||
-        session.messages.some(m => !restored.messages.some(r => r.info.id === m.info.id && r.parts.length === m.parts.length))) throw new Error('The saved conversation could not be restored completely.')
+        (version.startsWith('2.') ? JSON.stringify(restored.messages) !== JSON.stringify(session.messages) : session.messages.some(m => !restored.messages.some(r => r.info.id === m.info.id && r.parts.length === m.parts.length)))) throw new Error('The saved conversation could not be restored completely.')
     setEnv('RESUME_SESSION_ID', session.info.id)
   } finally { rmSync(file, { force: true }) }
 }
@@ -174,14 +186,14 @@ export function saveCheckpoint({ interrupted = false } = {}) {
   const sessionId = readFileSync(sessionFile, 'utf8').trim()
   if (!/^ses_[A-Za-z0-9]+$/.test(sessionId)) throw new Error('Invalid session ID.')
   const binary = env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode')
-  const version = command(binary, ['--version'])
+  const version = normalizedVersion(command(binary, ['--version']))
   const secrets = Object.entries(env).filter(([k]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTH_CONTENT|PRIVATE_KEY/.test(k)).map(([,v]) => v)
   // Authentication JSON can contain individual secrets echoed separately in tool output.
   const leaves = value => typeof value === 'string' ? [value] : value && typeof value === 'object' ? Object.values(value).flatMap(leaves) : []
   try { secrets.push(...leaves(JSON.parse(env.OPENCODE_AUTH_CONTENT || '{}'))) } catch {}
   if (env.OMGITHUB_SECRET_VALUES_FILE) secrets.push(...JSON.parse(readFileSync(env.OMGITHUB_SECRET_VALUES_FILE, 'utf8')))
   if (env.OMGITHUB_ACCOUNT_AUTH_FILE && existsSync(env.OMGITHUB_ACCOUNT_AUTH_FILE)) secrets.push(...leaves(JSON.parse(readFileSync(env.OMGITHUB_ACCOUNT_AUTH_FILE, 'utf8'))))
-  const session = portableSession(redactSession(exportSession(binary, sessionId, project, env.RUNNER_TEMP), secrets))
+  const session = portableSession(redactSession(exportSession(binary, sessionId, project, env.RUNNER_TEMP, version), secrets))
   writeFileSync(join(directory, 'log-session-export.json'), JSON.stringify(session), { mode: 0o600 })
   const issue = Number(env.TRIGGER_ISSUE_NUMBER), run = Number(env.GITHUB_RUN_ID)
   const branch = `opencode-checkpoints/${issue}`
