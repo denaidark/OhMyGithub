@@ -47,3 +47,18 @@ test('handle busy sessions and validate V2 transcript structure', () => {
   assert.equal(validateV2Session(transcript), transcript)
   assert.throws(() => validateV2Session({ ...transcript, info: { id: 'ses_123', fork: { sessionID: 'ses_parent' } } }), /main-session/)
 })
+
+test('parse fragmented V2 server-sent events without confusing heartbeats', async () => {
+  const encoder = new TextEncoder()
+  const request = async () => new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of ['data: {"type":"server.', 'connected"}\r', '\n\r\n: heartbeat\n\n', 'data: {"type":"session.execution.succeeded",', '"data":{"sessionID":"ses_123"}}\n\n']) controller.enqueue(encoder.encode(chunk))
+      controller.close()
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } })
+  const api = createV2Client({ base: 'http://localhost', password: 'local', request })
+  const events = []
+  for await (const event of api.events()) events.push(event)
+  assert.deepEqual(events.map(event => event.type), ['server.connected', 'session.execution.succeeded'])
+  assert.equal(classifyV2Event(events[1], 'ses_123'), 'completed')
+})

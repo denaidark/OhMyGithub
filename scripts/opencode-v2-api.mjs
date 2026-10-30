@@ -53,6 +53,26 @@ export function createV2Client({ base, password, request = fetch }) {
       const [active, messages] = await Promise.all([this.active(), this.messages(id)])
       if (!active || typeof active !== 'object' || !Array.isArray(messages)) throw new Error('Invalid V2 session snapshot')
       return { id, busy: Object.hasOwn(active, id), messages }
+    },
+    async *events({ signal } = {}) {
+      const response = await request(new URL('/api/event', origin), {
+        headers: { authorization, accept: 'text/event-stream' }, signal
+      })
+      if (!response.ok || !response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {
+        throw new Error(`OpenCode V2 event stream returned HTTP ${response.status}`)
+      }
+      const decoder = new TextDecoder()
+      let buffer = ''
+      for await (const chunk of response.body) {
+        buffer = (buffer + decoder.decode(chunk, { stream: true })).replaceAll('\r\n', '\n')
+        let boundary
+        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+          const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2)
+          const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
+          if (data) yield JSON.parse(data)
+        }
+        if (buffer.length > 1024 * 1024) throw new Error('OpenCode V2 event frame exceeds the limit')
+      }
     }
   }
 }
