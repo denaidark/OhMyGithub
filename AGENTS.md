@@ -70,6 +70,15 @@ logs are unavailable until completion. Use `bash scripts/ssh-run-log.sh <run-id>
 for the live Actions log over SSH. Do not use tight `for` loops around `gh run list`,
 which needlessly consume GitHub API rate limit.
 
+Free OpenCode models are limited per egress IP, not per account.
+Treat a local `FreeUsageLimitError` 429 as local only.
+Read the runner's own `Selected model` and provider errors before blaming quota.
+Use `retryAfterMs` as the reset bound.
+Run repeated V2 tests with a connected provider; do not spend the free allowance on retries.
+
+Interrupting a V2 turn before the assistant message projects leaves no stopped message to save.
+Wait for that assistant message before requiring the interrupted idle marker.
+
 To connect to an issue's live worker, find its run ID with
 `gh run list --repo denaidark/OhMyGithub --workflow opencode.yml --status in_progress`,
 then run `bash scripts/ssh-run-log.sh <run-id>` to discover the host and port and SSH
