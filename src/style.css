@@ -143,6 +143,22 @@ h1 {
   color: #bdb7e8;
 }
 
+.verify-label {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  margin: 16px auto 0;
+  padding: 6px 14px;
+  border: 1px solid rgba(140, 245, 199, 0.4);
+  border-radius: 999px;
+  background: rgba(41, 173, 124, 0.14);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9df5cd;
+}
+
 @keyframes pop {
   50% {
     transform: translateY(4px) scale(0.97);
