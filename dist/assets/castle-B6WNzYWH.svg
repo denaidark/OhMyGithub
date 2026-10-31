@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 320" role="img" aria-labelledby="castle-title castle-desc">
+  <title id="castle-title">Castle</title>
+  <desc id="castle-desc">A stylised stone castle with four towers, a gate, a flag, and warm glowing windows.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5c54b8"/>
+      <stop offset="1" stop-color="#2a2360"/>
+    </linearGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d9d2f2"/>
+      <stop offset="1" stop-color="#8b82bd"/>
+    </linearGradient>
+    <linearGradient id="stoneDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#aaa1d6"/>
+      <stop offset="1" stop-color="#6d659c"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff1b8"/>
+      <stop offset="1" stop-color="#ffb52e"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="400" height="320" rx="26" fill="url(#sky)"/>
+  <circle cx="330" cy="58" r="26" fill="#ffe6a3" opacity="0.92"/>
+  <circle cx="322" cy="52" r="8" fill="#ffd36e" opacity="0.6"/>
+  <g fill="#ffffff" opacity="0.75">
+    <circle cx="58" cy="46" r="2.5"/>
+    <circle cx="108" cy="72" r="2"/>
+    <circle cx="152" cy="38" r="2.2"/>
+    <circle cx="246" cy="52" r="2"/>
+    <circle cx="372" cy="112" r="2.4"/>
+  </g>
+
+  <ellipse cx="200" cy="292" rx="156" ry="22" fill="#171238" opacity="0.55"/>
+
+  <!-- central keep -->
+  <rect x="136" y="132" width="128" height="150" rx="4" fill="url(#stone)"/>
+  <rect x="136" y="132" width="128" height="14" fill="#f0ebff"/>
+  <path d="M136 132h18v-20h18v20h18v-20h18v20h18v-20h18v20h20" fill="url(#stone)"/>
+  <rect x="181" y="176" width="38" height="54" rx="19" fill="#3b3469"/>
+  <path d="M181 206a19 19 0 0 1 38 0v24h-38z" fill="#2b2550"/>
+
+  <!-- left tower -->
+  <rect x="70" y="176" width="58" height="106" rx="4" fill="url(#stoneDark)"/>
+  <rect x="70" y="176" width="58" height="12" fill="#e7e1ff"/>
+  <path d="M70 176h14v-16h15v16h15v-16h14v16h20" fill="url(#stoneDark)"/>
+  <rect x="88" y="202" width="20" height="26" rx="10" fill="url(#glow)"/>
+  <rect x="88" y="244" width="20" height="26" rx="10" fill="url(#glow)" opacity="0.72"/>
+
+  <!-- right tower -->
+  <rect x="272" y="176" width="58" height="106" rx="4" fill="url(#stoneDark)"/>
+  <rect x="272" y="176" width="58" height="12" fill="#e7e1ff"/>
+  <path d="M272 176h14v-16h15v16h15v-16h14v16h20" fill="url(#stoneDark)"/>
+  <rect x="292" y="202" width="20" height="26" rx="10" fill="url(#glow)"/>
+  <rect x="292" y="244" width="20" height="26" rx="10" fill="url(#glow)" opacity="0.72"/>
+
+  <!-- central windows -->
+  <rect x="160" y="150" width="18" height="26" rx="9" fill="url(#glow)"/>
+  <rect x="222" y="150" width="18" height="26" rx="9" fill="url(#glow)"/>
+
+  <!-- flag -->
+  <rect x="198" y="56" width="4" height="58" rx="2" fill="#f4efff"/>
+  <path d="M202 60l48 12-48 16z" fill="#ff7a59"/>
+  <circle cx="200" cy="54" r="4" fill="#ffd27a"/>
+
+  <!-- ground -->
+  <path d="M0 282c42-16 78 12 120-4s72 10 118-4 106 12 162-2v48H0z" fill="#251f4d"/>
+  <path d="M0 300c54-10 86 8 138-2s82 8 128-2 88 8 134-2v26H0z" fill="#191436"/>
+</svg>
