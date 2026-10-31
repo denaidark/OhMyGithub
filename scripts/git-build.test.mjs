@@ -12,12 +12,11 @@ test('publish unpacked build files separately from pinned source and retain prio
     git('init');git('config', 'user.name', 'Test');git('config', 'user.email', 'test@example.test')
     git('init', '--bare', join(root, 'remote.git'));git('remote', 'add', 'origin', join(root, 'remote.git'))
     writeFileSync(join(root, 'source.js'), 'source');git('add', 'source.js');git('commit', '-m', 'Source')
-    const sourceCommit = git('rev-parse', 'HEAD'), directory = join(root, 'dist'), evidence = join(root, 'evidence')
-    mkdirSync(directory);mkdirSync(evidence);mkdirSync(join(directory, 'assets'))
+    const sourceCommit = git('rev-parse', 'HEAD'), directory = join(root, 'dist')
+    mkdirSync(directory);mkdirSync(join(directory, 'assets'))
     writeFileSync(join(directory, 'index.html'), '<title>Game</title><script src="./assets/game.js"></script>')
     writeFileSync(join(directory, 'assets/game.js'), 'game')
-    for (const name of ['desktop', 'mobile']) writeFileSync(join(evidence, `final-${name}.png`), 'png')
-    const input = { root, directory, evidence, temporary: root, repository: 'alice/game', issue: 6, run: 1, attempt: 1, generation: '1', sourceCommit }
+    const input = { root, directory, temporary: root, repository: 'alice/game', issue: 6, run: 1, attempt: 1, generation: '1', sourceCommit }
     const first = commitBuild(input)
     assert.equal(git('show', `${first.build_commit}:assets/game.js`), 'game')
     assert.equal(JSON.parse(git('show', `${first.build_commit}:.omgithub/deployment.json`)).source_commit, sourceCommit)

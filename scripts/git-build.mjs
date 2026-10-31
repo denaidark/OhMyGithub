@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readdirSync, lstatSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-export function commitBuild({ root, directory, evidence, temporary, repository, issue, run, attempt, generation, sourceCommit }) {
+export function commitBuild({ root, directory, temporary, repository, issue, run, attempt, generation, sourceCommit }) {
   const started = Date.now()
   const index = join(temporary, `build-index-${process.pid}`)
   const command = (args, options = {}) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'], ...options }).trim()
@@ -26,11 +26,6 @@ export function commitBuild({ root, directory, evidence, temporary, repository, 
   try {
     if (!/^[a-f0-9]{40}$/.test(sourceCommit)) throw new Error('A source checkpoint is required')
     walk(resolve(directory))
-    for (const name of readdirSync(evidence).filter(name => /^final-.*\.(png|jpe?g|webp)$/.test(name))) {
-      const path = join(evidence, name), size = lstatSync(path).size
-      if (size > 100000000) skipped.push({ path: `screenshots/${name}`, bytes: size })
-      else entries.push({ path, name: `screenshots/${name}` })
-    }
     if (!entries.some(x => x.name === 'index.html')) throw new Error('Build has no index.html')
     if (skipped.length) {
       writeFileSync(join(temporary, 'skipped-build-files.json'), JSON.stringify(skipped))
@@ -45,7 +40,7 @@ export function commitBuild({ root, directory, evidence, temporary, repository, 
     const html = readFileSync(join(directory, 'index.html'), 'utf8')
     const manifest = { version: 1, repository, issue_number: Number(issue), run_id: String(run), attempt: Number(attempt), generation: String(generation), source_commit: sourceCommit,
       title: (html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || 'Game').slice(0, 160),
-      description: '', screenshots: entries.filter(x => x.name.startsWith('screenshots/')).map(x => x.name), skipped_files: skipped }
+      description: '', skipped_files: skipped }
     put('.omgithub/deployment.json', git(['hash-object', '-w', '--stdin'], JSON.stringify(manifest)))
     const commit = git(['commit-tree', git(['write-tree']), '-p', remote || sourceCommit, '-m', `Publish static build for issue #${issue}\n\nRun: ${run}\nAttempt: ${attempt}\nGeneration: ${generation}\nSource: ${sourceCommit}`])
     command(['push', 'origin', `${commit}:refs/heads/${branch}`])

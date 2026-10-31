@@ -20,11 +20,11 @@ Commit source and .omgithub/checkpoint.json on opencode-checkpoints/ISSUE. Inclu
 
 ## Publish builds
 
-Validate startup and capture through scripts/preview-setup.mjs. Repair project scripts in a fork only after failure. Use relative asset paths; configure Vite builds with a relative base. Commit unpacked static output, final screenshots, and .omgithub/deployment.json on opencode-deployments/ISSUE. Keep source and build commit identities separate. Capture the exact immutable f.ondev.store URL before activating its catalog record. Preserve the previous playable deployment when validation fails.
+Validate startup and capture through scripts/preview-setup.mjs. Repair project scripts in a fork only after failure. Use relative asset paths; configure Vite builds with a relative base. Commit unpacked static output and .omgithub/deployment.json on opencode-deployments/ISSUE. Upload final screenshots to OmGithub as WebP. Keep source and build commit identities separate. Capture the exact immutable f.ondev.store URL before activating its catalog record. Preserve the previous playable deployment when validation fails.
 
 ## Publish progress images
 
-Batch captures into opencode-progress/ISSUE commits every thirty seconds. Register immutable f.ondev.store URLs with OmGithub. Keep image bytes off the server. Keep old hosted screenshot readers available.
+Upload progress captures to OmGithub every two seconds. Compress them to WebP when smaller and register immutable OmGithub URLs. Keep old hosted screenshot readers available.
 
 ## Resume and remix
 
