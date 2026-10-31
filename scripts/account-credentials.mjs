@@ -1,3 +1,4 @@
+import { createConsoleCredentialBridge } from './console-credentials.mjs'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -29,6 +30,15 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
     const values = existsSync(secretFile) ? JSON.parse(readFileSync(secretFile, 'utf8')) : []
     for (const item of leaves(value)) if (item && !values.includes(item)) { mask(item); values.push(item) }
     save(secretFile, values)
+  }
+  const consoleBridge = createConsoleCredentialBridge({ env, request, remember })
+  async function installConsole() {
+    if (!existsSync(stateFile)) return
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'))
+    if (!(state.imported || []).includes('opencode')) return
+    if (state.consoleCredential) return
+    const id = await consoleBridge.install(state.auth)
+    if (id) { state.consoleCredential = id; save(stateFile, state) }
   }
   async function call(body) {
     const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL); url.searchParams.set('audience', origin)
@@ -92,7 +102,15 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
       return
     }
     const state = JSON.parse(readFileSync(stateFile, 'utf8'))
+    if (state.syncStopped) {
+      if (release) {
+        await consoleBridge.remove(state.consoleCredential)
+        rmSync(stateFile, { force: true }); rmSync(authFile, { force: true })
+      }
+      return
+    }
     const auth = JSON.parse(readFileSync(authFile, 'utf8'))
+    if (state.consoleCredential) auth.opencode = await consoleBridge.read(state.consoleCredential)
     // Only return the providers actually checked out from this account.
     const imported = new Set(state.imported || Object.keys(state.auth))
     const selected = Object.fromEntries(Object.keys(state.auth).map(key => [key, imported.has(key) ? auth[key] : state.auth[key]]))
@@ -100,22 +118,29 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
     const changed = JSON.stringify(selected) !== JSON.stringify(state.auth)
     try {
       const data = await call({ operation: 'refresh', revision: state.revision, ...(changed ? { auth: selected } : {}), release })
-      save(stateFile, { revision: data.revision, auth: selected, imported: [...imported] })
+      save(stateFile, { revision: data.revision, auth: selected, imported: [...imported], ...(state.consoleCredential ? { consoleCredential: state.consoleCredential } : {}) })
     } catch (error) {
-      if (error.status === 409) { rmSync(stateFile, { force: true }); console.log('Account credentials changed; retained the newer account version.'); return }
+      if (error.status === 409) {
+        if (state.consoleCredential && !release) save(stateFile, { ...state, syncStopped: true })
+        else rmSync(stateFile, { force: true })
+        console.log('Account credentials changed; retained the newer account version.'); return }
       throw error
     } finally {
-      if (release) { rmSync(stateFile, { force: true }); rmSync(authFile, { force: true }) }
+      if (release) {
+        if (state.consoleCredential) await consoleBridge.remove(state.consoleCredential)
+        rmSync(stateFile, { force: true }); rmSync(authFile, { force: true })
+      }
     }
   }
-  return { load, sync, stateFile, mcpFile }
+  return { load, sync, installConsole, stateFile, mcpFile }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const client = createCredentialClient(), mode = process.argv[2] || 'load'
   if (mode === 'load') {
     const result = await client.load()
     console.log(`Loaded ${result.customSecrets} account secret(s); subscription auth: ${result.accountAuth ? 'account' : 'repository/default'}.`)
-  } else if (mode === 'watch') {
+  } else if (mode === 'install-console') await client.installConsole()
+  else if (mode === 'watch') {
     while (existsSync(client.stateFile)) {
       await new Promise(resolve => setTimeout(resolve, 60000))
       try { await client.sync() } catch { console.log('Account auth sync unavailable; retrying in one minute.') }

@@ -131,3 +131,44 @@ test('import missing Go providers beside repository OpenAI auth without syncing 
   assert.equal(f.calls.at(-1).auth['opencode-go'].key, 'updated-go')
   await f.client.sync(true); assert.equal(existsSync(f.file), false)
 })
+
+test('native Console installation and rotated tokens synchronize through the V2 API', async t => {
+  const consoleAuth = { opencode: { type: 'oauth', access: 'console-access', refresh: 'console-refresh', expires: 123, metadata: { orgID: 'workspace', server: 'https://opencode.ai/console' } } }
+  const f = fixture(t, { OPENCODE_WEB_PORT: '12345', OPENCODE_PASSWORD: 'server-password' }, consoleAuth)
+  let value = { ...consoleAuth.opencode, methodID: 'device' }, deleted = false
+  const client = createCredentialClient({ env: f.env, mask: () => {}, request: async (url, options) => {
+    if (String(url).startsWith('http://127.0.0.1')) {
+      if (options.method === 'POST') return Response.json({ data: { id: 'cred_console', value } })
+      if (options.method === 'DELETE') { deleted = true; return new Response(null, { status: 204 }) }
+      return Response.json({ data: [{ id: 'cred_console', integrationID: 'opencode', value: { ...value, access: 'rotated-access' } }] })
+    }
+    if (String(url).startsWith('https://identity.test')) return Response.json({ value: 'oidc' })
+    const body = JSON.parse(options.body); f.calls.push(body)
+    return Response.json(body.operation === 'refresh' ? { revision: 'r2' } : { revision: 'r1', auth: consoleAuth, secrets: {} })
+  } })
+  await client.load(); await client.installConsole(); await client.sync()
+  assert.equal(f.calls.at(-1).auth.opencode.access, 'rotated-access')
+  assert.equal(f.calls.at(-1).auth.opencode.metadata.orgID, 'workspace')
+  assert.equal(f.calls.at(-1).auth.opencode.methodID, undefined)
+  await client.sync(true); assert.equal(deleted, true); assert.equal(existsSync(f.file), false)
+})
+test('Console revision conflicts stop uploads without disconnecting active native work', async t => {
+  const auth = { opencode: { type: 'oauth', access: 'access', refresh: 'refresh', expires: 123, metadata: { orgID: 'org' } } }
+  const f = fixture(t, { OPENCODE_WEB_PORT: '12345', OPENCODE_PASSWORD: 'pw' }, auth)
+  let removed = false, refreshes = 0
+  const value = { ...auth.opencode, methodID: 'device' }
+  const client = createCredentialClient({ env: f.env, mask: () => {}, request: async (url, options) => {
+    if (String(url).startsWith('http://127.0.0.1')) {
+      if (options.method === 'POST') return Response.json({ data: { id: 'cred_console', value } })
+      if (options.method === 'DELETE') { removed = true; return new Response(null, { status: 204 }) }
+      return Response.json({ data: [{ id: 'cred_console', integrationID: 'opencode', value }] })
+    }
+    if (String(url).startsWith('https://identity.test')) return Response.json({ value: 'oidc' })
+    const body = JSON.parse(options.body)
+    if (body.operation === 'refresh') { refreshes++; return new Response('{}', { status: 409 }) }
+    return Response.json({ revision: 'r1', auth, secrets: {} })
+  } })
+  await client.load(); await client.installConsole(); await client.sync(); assert.equal(removed, false)
+  await client.sync(); assert.equal(refreshes, 1)
+  await client.sync(true); assert.equal(removed, true); assert.equal(existsSync(f.file), false)
+})

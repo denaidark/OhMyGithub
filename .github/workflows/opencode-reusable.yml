@@ -188,8 +188,6 @@ jobs:
         run: |
           set -euo pipefail
           /usr/bin/time -p node "$RUNTIME_DIR/scripts/account-credentials.mjs" load
-          nohup node "$RUNTIME_DIR/scripts/account-credentials.mjs" watch > "$RUNNER_TEMP/omgithub-account-auth-sync.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/omgithub-account-auth-sync.pid"
 
       - name: Prepare selected remix snapshot
         timeout-minutes: 15
@@ -681,6 +679,11 @@ jobs:
             sleep 1
           done
           [[ "$healthy" == true ]] || { echo 'OpenCode V2 server did not become healthy' >&2; exit 1; }
+
+          export OPENCODE_WEB_PORT
+          /usr/bin/time -p node "$RUNTIME_DIR/scripts/account-credentials.mjs" install-console
+          nohup node "$RUNTIME_DIR/scripts/account-credentials.mjs" watch > "$RUNNER_TEMP/omgithub-account-auth-sync.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/omgithub-account-auth-sync.pid"
 
           export PROJECT_FILE_PORT
           /usr/bin/time -p bash "$RUNTIME_DIR/scripts/start-live-files.sh"
