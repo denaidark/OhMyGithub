@@ -16,8 +16,6 @@ on:
         value: ${{ jobs.prepare.outputs.request }}
       issue_title:
         value: ${{ jobs.prepare.outputs.issue_title }}
-      opencode_version:
-        value: ${{ jobs.prepare.outputs.opencode_version }}
       labels_json:
         value: ${{ jobs.prepare.outputs.labels_json }}
       sender:
@@ -40,7 +38,6 @@ jobs:
       issue_number: ${{ steps.prepare.outputs.issue_number }}
       request: ${{ steps.prepare.outputs.request }}
       issue_title: ${{ steps.prepare.outputs.issue_title }}
-      opencode_version: ${{ steps.prepare.outputs.opencode_version }}
       labels_json: ${{ steps.prepare.outputs.labels_json }}
       sender: ${{ steps.prepare.outputs.sender }}
       target_ref: ${{ steps.prepare.outputs.target_ref }}

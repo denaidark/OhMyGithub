@@ -6,7 +6,7 @@ Inspect the OpenCode implementation at `/Users/igor/Documents/ChatGPT/opencode` 
 ## Wiki index
 
 - [OpenCode workflow](wiki/opencode.md)
-- [Test OpenCode 2 in isolation](wiki/opencode-v2-experiment.md)
+- [Test OpenCode execution](wiki/opencode-v2-experiment.md)
 - [Oh My Github App](https://github.com/denaidark/omsite/blob/main/wiki/oh-my-github-app.md)
 - [Temporary Mac SSH access](wiki/access.md)
 - [Testing and verification](wiki/testing.md)

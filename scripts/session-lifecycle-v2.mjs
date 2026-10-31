@@ -1,7 +1,6 @@
 import { classifyV2Event, finishedV2Message } from './opencode-v2-api.mjs'
 
-// Preserve the V1 lifecycle's cancellation and deduplication semantics while
-// consuming V2 execution events and V2's newest-first message projection.
+// Serialize cancellation and completion against newest-first session projections.
 export class V2LifecycleBridge {
   constructor({ api, lifecycle, sessionID, onError = error => console.error(error.message) }) {
     Object.assign(this, { api, lifecycle, sessionID, onError })

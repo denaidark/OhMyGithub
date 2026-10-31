@@ -19,7 +19,9 @@ try {
   for (const [name, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
     const page = await browser.newPage({ viewport: { width, height } }).catch(transient)
     page.setDefaultTimeout(30000)
-    page.on('pageerror', error => console.error(error.message))
+    const failures = []
+    page.on('pageerror', error => { console.error(error.message); failures.push(error.message) })
+    page.on('response', response => { if (response.status() >= 400 && new URL(response.url()).origin === new URL(url).origin) failures.push(`HTTP ${response.status()}: ${response.url()}`) })
     const response = await page.goto(url, { waitUntil: 'load', timeout: 45000 }).catch(transient)
     if (!response?.ok()) throw Object.assign(new Error(`HTTP ${response?.status()} loading preview`), { exitCode: !response || [408, 429, 500, 502, 503, 504].includes(response.status()) ? 75 : 1 })
     await page.locator(process.env.CAPTURE_READY_SELECTOR || 'body').waitFor({ state: 'visible' })
@@ -34,6 +36,7 @@ try {
       if (error.name === 'TimeoutError' || !browser.isConnected()) transient(error)
       throw error
     })
+    if (process.env.CAPTURE_STRICT === '1' && failures.length) throw new Error(`Published build failed: ${failures.join('; ')}`)
     await page.close()
   }
 } catch (error) { console.error(error); process.exitCode = error.exitCode || 1 }

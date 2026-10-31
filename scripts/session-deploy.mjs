@@ -1,3 +1,4 @@
+import { commitBuild } from './git-build.mjs'
 import { createV2Client } from './opencode-v2-api.mjs'
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -12,16 +13,10 @@ const env = process.env
 const evidence = join(env.RUNNER_TEMP, `validation-${env.CHECKPOINT_GENERATION}`)
 const project = env.PROJECT_DIR
 const base = `http://127.0.0.1:${env.OPENCODE_WEB_PORT}`
-const v2 = env.OPENCODE_V2 === '1'
-const v2api = v2 ? createV2Client({ base, password: env.OPENCODE_PASSWORD }) : null
+const v2api = createV2Client({ base, password: env.OPENCODE_PASSWORD })
 const main = readFileSync(join(env.OPENCODE_WEB_DIR, 'checkpoint-session-id'), 'utf8').trim()
-const api = async (path, options = {}, workingDirectory = env.PROJECT_DIR) => {
-  const response = await fetch(`${base}${path}`, { ...options, headers: { 'content-type': 'application/json', 'x-opencode-directory': workingDirectory }, signal: AbortSignal.timeout(30000) })
-  if (!response.ok) throw new Error(`OpenCode HTTP ${response.status}`)
-  return response.json()
-}
 let fork
-async function abort() { if (fork) { if (v2) await v2api.interrupt(fork.id); else await api(`/session/${fork.id}/abort`, { method: 'POST' }, project) } }
+async function abort() { if (fork) await v2api.interrupt(fork.id) }
 const controller = new AbortController()
 async function command(file, args) {
   const started = Date.now()
@@ -33,11 +28,11 @@ try {
   mkdirSync(evidence, { recursive: true })
   const runFork = async prompt => {
     if (!fork) {
-      fork = v2 ? await v2api.fork(main) : await api(`/session/${main}/fork`, { method: 'POST', body: JSON.stringify({ messageID: env.MAIN_MESSAGE_ID }) })
+      fork = await v2api.fork(main)
       if (!fork.id?.startsWith('ses_')) throw new Error('No repair fork created')
       writeFileSync(join(env.OPENCODE_WEB_DIR, 'active-validation.json'), JSON.stringify({ id: fork.id, directory: project }))
     }
-    const connection = v2 ? ['--server', base] : ['--dangerously-skip-permissions', '--attach', base, '--dir', project]
+    const connection = ['--server', base]
     await child(env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode'), ['run', '--auto', ...connection, '--session', fork.id, '--model', readFileSync(join(env.OPENCODE_WEB_DIR, 'main-model'), 'utf8').trim(), prompt], { signal: controller.signal, cwd: project })
   }
   const { repaired } = await preparePreview({ env, evidence, signal: controller.signal, repair: runFork })
@@ -56,28 +51,26 @@ try {
   }
   const screenshots = readdirSync(evidence).filter(name => /^final-.*\.(png|jpe?g|webp)$/i.test(name))
   if (!['final-desktop.png', 'final-mobile.png'].every(name => screenshots.includes(name))) throw new Error('Capture produced no screenshots')
-  const archive = join(env.RUNNER_TEMP, `deployment-${env.CHECKPOINT_GENERATION}.zip`)
   const output = JSON.parse(readFileSync(join(env.OPENCODE_WEB_DIR, 'deployment-output.json'), 'utf8'))
   const deployDirectory = validateDeploymentOutput(project, output)
-  await command('python3', ['-c', `import os,sys,zipfile
-root,out,evidence=sys.argv[1:]
-if not os.path.isfile(os.path.join(root,'index.html')): raise Exception('Missing deployment index.html')
-with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
- for base,dirs,files in os.walk(root):
-  dirs[:]=[d for d in dirs if d not in ['node_modules','.git','.opencode','.agents','.opencode-web','.omgithub-runtime','.opencode-ssh','.playwright-cli','screenshots']]
-  for name in files:
-   if name.startswith(('.env','opencode-agentsweb-')) or name.endswith(('.log','.pid')): continue
-   p=os.path.join(base,name)
-   if not os.path.islink(p): z.write(p,os.path.relpath(p,root))
- for name in os.listdir(evidence):
-  p=os.path.join(evidence,name)
-  if name.startswith('final-') and os.path.isfile(p): z.write(p,'screenshots/'+name)`, deployDirectory, archive, evidence])
+  const build = commitBuild({ root: env.GITHUB_WORKSPACE, directory: deployDirectory, evidence, temporary: env.RUNNER_TEMP,
+    repository: env.GITHUB_REPOSITORY, issue: env.TRIGGER_ISSUE_NUMBER, run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT || '1',
+    generation: env.DEPLOYMENT_GENERATION, sourceCommit: env.CHECKPOINT_COMMIT })
+  const hostedUrl = `https://f.ondev.store/${env.GITHUB_REPOSITORY}/blob/${build.build_commit}/`
+  await retry(async () => {
+    const ready = await fetch(hostedUrl + 'index.html', { method: 'HEAD', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]) })
+    if (!ready.ok) throw new Error(`Published build not ready: HTTP ${ready.status}`)
+  }, { signal: controller.signal, attempts: 8 })
+  const hostedEvidence = join(evidence, 'github-verification')
+  await retry(() => child(process.execPath, [join(env.RUNTIME_DIR, 'scripts/default-capture.mjs')], { signal: controller.signal, cwd: project,
+    env: { ...env, CAPTURE_URL: hostedUrl, CAPTURE_DIR: hostedEvidence, CAPTURE_STRICT: '1' } }),
+    { signal: controller.signal, retryable: error => error.exitCode === 75 })
   if (controller.signal.aborted) throw new Error('Cancelled')
   const site = env.OMGITHUB_ORIGIN || 'https://omgithub.com'
   const deployed = await uploadDeployment(`${site}/api/github/${env.GITHUB_REPOSITORY}/issues/${env.TRIGGER_ISSUE_NUMBER}/deployment`, { method: 'POST', headers: {
-    authorization: `Bearer ${env.OMGITHUB_CALLBACK_TOKEN || ''}`, 'content-type': 'application/zip', 'x-omgithub-run': env.GITHUB_RUN_ID, 'x-omgithub-attempt': env.GITHUB_RUN_ATTEMPT || '1',
+    authorization: `Bearer ${env.OMGITHUB_CALLBACK_TOKEN || ''}`, 'content-type': 'application/json', 'x-omgithub-run': env.GITHUB_RUN_ID, 'x-omgithub-attempt': env.GITHUB_RUN_ATTEMPT || '1',
     'x-omgithub-generation': env.DEPLOYMENT_GENERATION, 'x-omgithub-commit': env.CHECKPOINT_COMMIT
-  }, body: readFileSync(archive), signal: controller.signal })
+  }, body: JSON.stringify({ build_commit: build.build_commit }), signal: controller.signal })
   if (controller.signal.aborted) throw new Error('Cancelled')
   writeFileSync(join(env.OPENCODE_WEB_DIR, 'deployment-result.json'), JSON.stringify({ ...deployed, generation: env.DEPLOYMENT_GENERATION, sync: 'pending' }))
   try {
@@ -95,7 +88,6 @@ with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
     console.error('Result reporting failed:', error.message)
     writeFileSync(join(env.OPENCODE_WEB_DIR, 'deployment-result.json'), JSON.stringify({ ...deployed, generation: env.DEPLOYMENT_GENERATION, sync: 'failed', sync_error: error.message }))
   }
-  rmSync(archive, { force: true })
   if (JSON.parse(readFileSync(join(env.OPENCODE_WEB_DIR, 'deployment-result.json'), 'utf8')).sync === 'ready') rmSync(evidence, { recursive: true, force: true })
 } finally {
   await abort().catch(error => console.error(error.message))

@@ -1,8 +1,7 @@
-import { gzipSync } from 'node:zlib'
 import { normalizeV2Version, validateV2Session } from './opencode-v2-api.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, lstatSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,11 +19,11 @@ export function command(file, args, options = {}) {
 }
 // OpenCode can exit before a piped stdout buffer drains. A regular file descriptor
 // makes large JSON exports synchronous at the CLI boundary instead of truncating them.
-export function exportSession(binary, sessionId, cwd, temporaryDirectory, version = '1.0.0', standalone = false) {
+export function exportSession(binary, sessionId, cwd, temporaryDirectory, version = '2.2.2', standalone = false) {
   const file = join(temporaryDirectory, `session-export-${randomUUID()}.json`)
   const fd = openSync(file, 'wx', 0o600)
   try {
-    const args = version.startsWith('2.') ? ['session', 'export', sessionId, ...(standalone ? ['--standalone'] : ['--server', `http://127.0.0.1:${env.OPENCODE_WEB_PORT}`])] : ['export', sessionId]
+    const args = ['session', 'export', sessionId, ...(standalone ? ['--standalone'] : ['--server', `http://127.0.0.1:${env.OPENCODE_WEB_PORT}`])]
     command(binary, args, { cwd, stdio: ['ignore', fd, 'pipe'] })
     return JSON.parse(readFileSync(file, 'utf8'))
   } finally { closeSync(fd); rmSync(file, { force: true }) }
@@ -44,38 +43,21 @@ export function parseResume(request) {
   return { ...source, prompt: String(request).replace(matches[0][0], '').replace(/<!-- omgithub-resume-request:[a-f0-9]+ -->/g, '').replace(/^Continue from https:\/\/github\.com\/[^\n]+\n?/gm, '').trim() }
 }
 export function normalizedVersion(output) {
-  return String(output).trim().startsWith('opencode v2.') ? normalizeV2Version(output) : String(output).trim()
+  return normalizeV2Version(output)
 }
 export function validTranscript(session, version) {
-  if (version.startsWith('2.')) {
-    try { validateV2Session(session); return true } catch { return false }
-  }
-  return Array.isArray(session?.messages) && session.messages.length > 0 && session.messages.every(m => m.info?.id && ['user', 'assistant'].includes(m.info.role) && Array.isArray(m.parts))
+  if (!/^2\./.test(version)) return false
+  try { validateV2Session(session); return true } catch { return false }
 }
 export function validateCheckpoint(c, source) {
   if (!(c?.version === 2 && c.repository?.toLowerCase() === source.source_repository.toLowerCase() && c.issue_number === source.source_issue &&
       Number.isSafeInteger(c.run_id) && c.run_id > 0 && /^[a-f0-9]{40}$/.test(c.commit) && /^opencode-checkpoints\/[1-9]\d*$/.test(c.branch) &&
       typeof c.project_dir === 'string' && !c.project_dir.startsWith('/') && !c.project_dir.includes('\\') && !/[\r\n\0]/.test(c.project_dir) && !c.project_dir.split('/').includes('..') &&
-      /^\d+\.\d+\.\d+$/.test(c.opencode_version) && c.public_history === true && /^ses_[a-zA-Z0-9]+$/.test(c.session?.info?.id || '') &&
-      validTranscript(c.session, c.opencode_version))) throw new Error('No complete saved session is available.')
-  if (c.session.info.parentID || c.session.info.fork) throw new Error('This checkpoint contains a verification fork. Select an earlier main-session checkpoint or start a new build.')
+      /^2\.\d+\.\d+$/.test(c.opencode_version) && c.public_history === true && (c.code_only === true || /^ses_[a-zA-Z0-9]+$/.test(c.session?.info?.id || '') && validTranscript(c.session, c.opencode_version)))) throw new Error('No complete saved session is available.')
+  if (c.session?.info?.parentID || c.session?.info?.fork) throw new Error('This checkpoint contains a verification fork. Select an earlier main-session checkpoint or start a new build.')
   return c
 }
-export function portableSession(value) {
-  const session = structuredClone(value)
-  for (const message of session.messages || []) {
-    if (!Array.isArray(message.parts)) continue
-    message.parts = message.parts.flatMap(part => {
-      // Provider replay IDs, signatures and encrypted reasoning belong to the old
-      // caller. Keep all readable transcript/tool content, not those opaque tokens.
-      delete part.metadata
-      if (part.type !== 'reasoning') return [part]
-      if (!part.text?.trim()) return []
-      return [{ id: part.id, sessionID: part.sessionID, messageID: part.messageID, type: 'text', text: part.text }]
-    })
-  }
-  return session
-}
+export function portableSession(value) { return structuredClone(value) }
 
 export function redactSession(session, secrets = []) {
   function clean(value) {
@@ -91,7 +73,7 @@ export function redactSession(session, secrets = []) {
   return clean(session)
 }
 const forbidden = /(^|\/)(?:\.env(?:\.[^/]*)?|auth\.json|credentials(?:\.json)?|node_modules|screenshots|\.playwright-cli|\.git|\.agents|\.agentsweb|\.omgithub-runtime|\.opencode-ssh|\.opencode-web|opencode-agentsweb-id_ed25519(?:\.pub)?)(\/|$)|(?:\.log|\.pid|\.pem|\.key)$/i
-export function excludedPath(path) { return forbidden.test(path) || /(^|\/)\.opencode\/(?:goals|auth\.json)(\/|$)/.test(path) }
+export function excludedPath(path) { return path === '.omgithub' || path.startsWith('.omgithub/') || forbidden.test(path) || /(^|\/)\.opencode\/(?:goals|auth\.json)(\/|$)/.test(path) }
 
 // Snapshot game edits, not listener changes. A new branch is compared with the
 // current default branch by GitHub, which may have advanced since checkout.
@@ -102,7 +84,6 @@ export function retainWorkflowTree(git, baseline) {
   if (entries) git('update-index', '-z', '--index-info', { input: entries.endsWith('\0') ? entries : entries + '\0' })
 }
 
-function api(path, args = []) { return command('gh', ['api', path, ...args]) }
 function checkpointPath() { return join(env.RUNNER_TEMP, 'omgithub-restore-checkpoint.json') }
 function setEnv(name, value) {
   const delimiter = `OMGHITHUB_${randomUUID().replaceAll('-', '')}`
@@ -117,29 +98,24 @@ export function prepare() {
   const source = parseResume(env.COMMENT_BODY || '')
   if (!source) return
   if (!source.prompt.trim()) throw new Error('Enter the next game change.')
-  let payload
-  const managedUrl = `${env.OMGITHUB_ORIGIN || 'https://omgithub.com'}/api/github/${source.source_repository}/issues/${source.source_issue}/checkpoint`
+  if (!/^[a-f0-9]{40}$/.test(source.source_commit || '')) throw new Error('A pinned source commit is required.')
   const download = join(env.RUNNER_TEMP, `checkpoint-download-${randomUUID()}.json`)
+  let payload
+  const raw = `https://raw.githubusercontent.com/${source.source_repository}/${source.source_commit}`
   try {
-    command('curl', ['--fail', '--silent', '--show-error', '--max-time', '120', '--output', download, managedUrl])
-    payload = JSON.parse(readFileSync(download, 'utf8'))
-  }
-  catch (error) {
-    if (error.status !== 404) throw error
-    // Read old releases until their checkpoints have moved to OmGithub storage.
-    const repository = JSON.parse(api(`repos/${source.source_repository}`))
-    if (repository.private) throw new Error('Only public checkpoints can be copied.')
-    const release = JSON.parse(api(`repos/${source.source_repository}/releases/tags/${source.checkpoint_tag}`))
-    const manifestName = release.body?.match(/<!-- checkpoint-asset:([^ ]+) -->/)?.[1]
-    const asset = release.assets?.find(a => a.name === manifestName && a.state === 'uploaded' && a.size > 0 && a.size <= 25 * 1024 * 1024)
-    if (release.draft || !asset) throw new Error('No complete saved session is available.')
-    payload = JSON.parse(api(`repos/${source.source_repository}/releases/assets/${asset.id}`, ['-H', 'Accept: application/octet-stream']))
-    if (payload.version !== 2) throw new Error('Unsupported checkpoint version.')
-    const sessionAsset = release.assets?.find(a => a.name === payload.session_asset && a.state === 'uploaded')
-    if (!sessionAsset) throw new Error('Missing conversation asset.')
-    payload.session = JSON.parse(api(`repos/${source.source_repository}/releases/assets/${sessionAsset.id}`, ['-H', 'Accept: application/octet-stream']))
-  }
-  finally { rmSync(download, { force: true }) }
+    const status = command('curl', ['--silent', '--show-error', '--location', '--max-time', '120', '--output', download, '--write-out', '%{http_code}', `${raw}/.omgithub/checkpoint.json`])
+    if (status === '404') payload = { version: 2, repository: source.source_repository, issue_number: source.source_issue, run_id: 1, branch: `opencode-checkpoints/${source.source_issue}`, project_dir: '', opencode_version: '2.2.2', public_history: true, conversation_status: 'missing' }
+    else if (status === '200') payload = JSON.parse(readFileSync(download, 'utf8'))
+    else throw new Error(`GitHub checkpoint read failed (${status}).`)
+    payload.commit = source.source_commit
+    payload.code_only = payload.conversation_status !== 'saved'
+    if (!payload.code_only) {
+      command('curl', ['--fail', '--silent', '--show-error', '--max-filesize', '100000000', '--max-time', '120', '--output', download, `${raw}/.omgithub/conversation.json`])
+      const bytes = readFileSync(download)
+      if (digest(bytes) !== payload.session_sha256) throw new Error('Checkpoint conversation digest does not match.')
+      payload.session = JSON.parse(bytes)
+    }
+  } finally { rmSync(download, { force: true }) }
   const checkpoint = validateCheckpoint(payload, source)
   if (source.source_commit && source.source_commit !== checkpoint.commit) throw new Error('The selected checkpoint has been replaced. Select the current saved version.')
   const importedSnapshot = usesImportedSnapshot(source, checkpoint)
@@ -152,27 +128,26 @@ export function prepare() {
   if (!importedSnapshot) setEnv('TARGET_SHA', checkpoint.commit)
   setEnv('PROJECT_PATH', checkpoint.project_dir || '.')
   setEnv('COMMENT_BODY', source.prompt)
-  setEnv('RESUME_OPENCODE_VERSION', checkpoint.opencode_version)
+  if (!checkpoint.code_only) setEnv('RESUME_OPENCODE_VERSION', checkpoint.opencode_version)
   setEnv('RESUME_CHECKPOINT_FILE', checkpointPath())
 }
 export function restore() {
   if (!env.RESUME_CHECKPOINT_FILE) return
   const checkpoint = JSON.parse(readFileSync(env.RESUME_CHECKPOINT_FILE, 'utf8'))
+  if (checkpoint.code_only) { process.stderr.write('Code restored. Starting a new conversation.\n'); return }
   if (checkpoint.session?.info?.parentID || checkpoint.session?.info?.fork) throw new Error('Cannot resume a verification fork. Select a main-session checkpoint.')
   const binary = env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode')
   const version = normalizedVersion(command(binary, ['--version']))
   if (version !== checkpoint.opencode_version) throw new Error('Install the saved OpenCode version before importing.')
   const session = portableSession(checkpoint.session)
-  session.info.directory = resolve(env.PROJECT_DIR)
+  session.info.location = { ...session.info.location, directory: resolve(env.PROJECT_DIR) }
   delete session.info.parentID
   const file = join(env.RUNNER_TEMP, 'omgithub-session-import.json')
   writeFileSync(file, JSON.stringify(session), { mode: 0o600 })
   try {
-    command(binary, version.startsWith('2.') ? ['session', 'import', file, '--standalone', '--directory', resolve(env.PROJECT_DIR)] : ['import', file], { cwd: env.PROJECT_DIR })
-    // Some CLI import errors exit zero. Prove all messages survived before submitting work.
-    const restored = exportSession(binary, session.info.id, env.PROJECT_DIR, env.RUNNER_TEMP, version, version.startsWith('2.'))
-    if (restored.info?.id !== session.info.id || restored.messages?.length !== session.messages.length ||
-        (version.startsWith('2.') ? JSON.stringify(restored.messages) !== JSON.stringify(session.messages) : session.messages.some(m => !restored.messages.some(r => r.info.id === m.info.id && r.parts.length === m.parts.length)))) throw new Error('The saved conversation could not be restored completely.')
+    command(binary, ['session', 'import', file, '--standalone', '--directory', resolve(env.PROJECT_DIR)], { cwd: env.PROJECT_DIR })
+    const restored = exportSession(binary, session.info.id, env.PROJECT_DIR, env.RUNNER_TEMP, version, true)
+    if (restored.info?.id !== session.info.id || JSON.stringify(restored.messages) !== JSON.stringify(session.messages)) throw new Error('The saved conversation could not be restored completely.')
     setEnv('RESUME_SESSION_ID', session.info.id)
   } finally { rmSync(file, { force: true }) }
 }
@@ -208,35 +183,47 @@ export function saveCheckpoint({ interrupted = false } = {}) {
     const baseline = remote || git('ls-remote', 'origin', 'HEAD').split(/\s/)[0]
     if (baseline) git('fetch', '--no-tags', 'origin', baseline)
     git('read-tree', 'HEAD')
-    git('add', '-A', '--', '.')
-    const files = command('git', ['ls-files', '-z'], { cwd: root, env: gitEnv }).split('\0').filter(Boolean)
-    const exclude = files.filter(excludedPath)
-    if (exclude.length) command('git', ['update-index', '--force-remove', '-z', '--stdin'], { cwd: root, env: gitEnv, input: `${exclude.join('\0')}\0` })
+    const files = git('ls-files', '--cached', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean)
+    const skipped = []
+    let sourceBytes = 0
+    const eligible = files.filter(path => {
+      if (excludedPath(path)) return false
+      try { const size = lstatSync(join(root, path)).size; sourceBytes += size <= 100000000 ? size : 0; if (size > 100000000) { skipped.push({ path, bytes: size }); return false } }
+      catch (error) { if (error.code !== 'ENOENT') throw error }
+      return true
+    })
+    if (sourceBytes > 1500000000) throw new Error('Source snapshot exceeds the bounded Git push budget.')
+    if (eligible.length) git('--literal-pathspecs', 'add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul', { input: eligible.join('\0') + '\0' })
+    const exclude = files.filter(path => !eligible.includes(path))
+    if (exclude.length) git('update-index', '--force-remove', '-z', '--stdin', { input: exclude.join('\0') + '\0' })
     if (baseline) retainWorkflowTree(git, baseline)
     const tree = git('write-tree')
-    const fingerprint = digest(`${tree}\n${version}\n${JSON.stringify(session)}`)
+    const fingerprint = digest(`${tree}\n${version}\n${JSON.stringify(session)}\n${JSON.stringify(skipped)}`)
     const stateFile = join(directory, 'checkpoint-state.json')
     let previous
     try { previous = JSON.parse(readFileSync(stateFile, 'utf8')) } catch {}
     if (previous?.fingerprint === fingerprint) return previous
-    const parent = git('rev-parse', 'HEAD')
-    const commit = git('commit-tree', tree, '-p', parent, '-m', `Save game and conversation for issue #${issue}\n\nRun: ${run}`)
-    const checkpoint = validateCheckpoint({ version: 2, repository: env.GITHUB_REPOSITORY, issue_number: issue, run_id: run, commit, branch,
-      project_dir: projectDir, opencode_version: version, session, public_history: true, created_at: new Date().toISOString() }, source)
     const generation = `${run}-${Date.now()}`
     const tag = `opencode-checkpoint-${issue}`
-    const { session: exported, ...metadata } = checkpoint
-    if (Buffer.byteLength(JSON.stringify(exported)) > 128 * 1024 * 1024) throw new Error('Session export exceeds 128 MB.')
-    git('push', `--force-with-lease=refs/heads/${branch}:${remote}`, 'origin', `${commit}:refs/heads/${branch}`)
-    const uploadPath = join(directory, `checkpoint-upload-${generation}.json`)
-    writeFileSync(uploadPath, gzipSync(JSON.stringify({ manifest: { ...metadata, generation, interrupted, session_id: sessionId }, session: exported })), { mode: 0o600 })
-    try {
-      command('curl', ['--fail-with-body', '--silent', '--show-error', '--max-time', '120', '-X', 'PUT',
-        '-H', `Authorization: Bearer ${env.OMGITHUB_CALLBACK_TOKEN || ''}`, '-H', 'Content-Type: application/octet-stream', '-H', 'Content-Encoding: gzip',
-        '-H', `x-omgithub-run: ${run}`, '-H', `x-omgithub-attempt: ${env.GITHUB_RUN_ATTEMPT || 1}`,
-        '--data-binary', `@${uploadPath}`,
-        `${env.OMGITHUB_ORIGIN || 'https://omgithub.com'}/api/github/${env.GITHUB_REPOSITORY}/issues/${issue}/checkpoint`])
-    } finally { rmSync(uploadPath, { force: true }) }
+    const bytes = Buffer.from(JSON.stringify(session))
+    const oversized = bytes.length > 100000000
+    if (oversized) skipped.push({ path: '.omgithub/conversation.json', bytes: bytes.length })
+    const metadata = { version: 2, repository: env.GITHUB_REPOSITORY, issue_number: issue, run_id: run, attempt: Number(env.GITHUB_RUN_ATTEMPT || 1), branch,
+      project_dir: projectDir, opencode_version: version, public_history: true, generation, interrupted, source_tree: tree,
+      conversation_status: oversized ? 'oversized' : 'saved', session_sha256: oversized ? null : digest(bytes), session_id: sessionId,
+      skipped_files: skipped, created_at: new Date().toISOString() }
+    const blob = (path, bytes) => git('update-index', '--add', '--cacheinfo', `100644,${git('hash-object', '-w', '--stdin', { input: bytes })},${path}`)
+    blob('.omgithub/checkpoint.json', JSON.stringify(metadata))
+    if (!oversized) blob('.omgithub/conversation.json', bytes)
+    const parent = remote || git('rev-parse', 'HEAD')
+    if (remote) {
+      let prior
+      try { prior = JSON.parse(git('show', `${remote}:.omgithub/checkpoint.json`)) } catch {}
+      if (prior && (prior.run_id > run || prior.run_id === run && prior.attempt > metadata.attempt)) throw new Error('Checkpoint was superseded.')
+    }
+    const commit = git('commit-tree', git('write-tree'), '-p', parent, '-m', `Save source and v2 conversation for issue #${issue}\n\nRun: ${run}\nGeneration: ${generation}`)
+    validateCheckpoint({ ...metadata, commit, code_only: oversized, ...(oversized ? {} : { session }) }, source)
+    git('push', 'origin', `${commit}:refs/heads/${branch}`)
     const state = { fingerprint, tag, commit, generation, sessionId }
     writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 })
     return state
@@ -251,9 +238,4 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     else if (mode === 'shutdown') saveCheckpoint({ interrupted: true })
     else throw new Error('Use prepare, restore, save, or shutdown.')
   } catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1 }
-}
-
-export function findRelease(path, request) {
-  try { return JSON.parse(request(path)) }
-  catch (error) { if (error.status === 404) return null; throw error }
 }

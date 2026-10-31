@@ -22,9 +22,10 @@ test('second checkpoint is conditional on repair', () => {
   assert.match(block, /CHECKPOINT_COMMIT = updated.commit/)
   assert.match(block, /CHECKPOINT_GENERATION = updated.generation/)
 })
-test('checkpoint path does not paginate or delete legacy releases', () => {
+test('checkpoint path stores history in Git without a server payload upload', () => {
   const source = read('./session-checkpoint.mjs')
-  assert.match(source, /releases\/tags\//)
+  assert.match(source, /\.omgithub\/conversation\.json/)
+  assert.doesNotMatch(source, /releases\/tags\/|--data-binary|gzipSync/)
   assert.doesNotMatch(source, /--paginate|release', 'delete'/)
 })
 test('packages declared output and isolates reporting failure from deployment success', () => {

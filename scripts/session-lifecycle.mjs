@@ -1,6 +1,5 @@
 import { createV2Client, v2SessionUrl } from './opencode-v2-api.mjs'
 import { V2LifecycleBridge, isV2MainInterrupt, isV2MainPrompt } from './session-lifecycle-v2.mjs'
-import { SessionRecovery } from './session-recovery.mjs'
 import { registerRun } from './run-record.mjs'
 import { uploadScreenshots } from './wip-upload.mjs'
 import { createServer, request as httpRequest } from 'node:http'
@@ -134,14 +133,6 @@ export function child(file, args, { signal, killGraceMs = 5000, settleGraceMs = 
   })
 }
 
-export function finishedMessage(current) {
-  const last = current.messages?.at(-1)?.info
-  if (current.busy || last?.role !== 'assistant' || !last.time?.completed) return null
-  if (last.error?.name === 'MessageAbortedError') return last.id
-  if (last.error || last.finish === 'tool-calls') return null
-  return last.id
-}
-
 export function v2PairPage(origin, sessionID) {
   const session = v2SessionUrl(origin, sessionID)
   // OpenCode 2.2.2's web client persists its server registry in this key.
@@ -186,14 +177,8 @@ async function serve() {
   }
   recordChildren()
   const upstream = `http://127.0.0.1:${env.OPENCODE_WEB_PORT}`
-  const v2 = env.OPENCODE_V2 === '1'
-  const v2api = v2 ? createV2Client({ base: upstream, password: env.OPENCODE_PASSWORD }) : null
+  const v2api = createV2Client({ base: upstream, password: env.OPENCODE_PASSWORD })
   const mainID = () => { try { return readFileSync(join(directory, 'checkpoint-session-id'), 'utf8').trim() } catch { return '' } }
-  const api = async (path, options = {}) => {
-    const response = await fetch(`${upstream}${path}`, { ...options, headers: { 'x-opencode-directory': env.PROJECT_DIR, 'content-type': 'application/json' }, signal: AbortSignal.timeout(30000) })
-    if (!response.ok) throw new Error(`OpenCode HTTP ${response.status}`)
-    return response.status === 204 ? undefined : response.json()
-  }
   const lifecycle = new Lifecycle({
     save: async (signal, interrupted) => {
       if (!mainID()) return null
@@ -209,11 +194,7 @@ async function serve() {
       writeFileSync(join(directory, 'deployment-status.json'), JSON.stringify({ state, generation, error, updated_at: new Date().toISOString() }))
       if (state === 'working' && existsSync(join(directory, 'active-validation.json'))) {
         const active = JSON.parse(readFileSync(join(directory, 'active-validation.json'), 'utf8'))
-        if (v2) await v2api.interrupt(active.id)
-        else {
-          const response = await fetch(`${upstream}/session/${active.id}/abort`, { method: 'POST', headers: { 'x-opencode-directory': active.directory }, signal: AbortSignal.timeout(30000) })
-          if (!response.ok) throw new Error('Could not stop validation. Retry the message.')
-        }
+        await v2api.interrupt(active.id)
         rmSync(join(directory, 'active-validation.json'), { force: true })
       }
       if (!lifecycle.stopping) {
@@ -225,16 +206,11 @@ async function serve() {
     }
   })
   try { lifecycle.generation = Number(JSON.parse(readFileSync(join(directory, 'deployment-status.json'), 'utf8')).generation) || 0 } catch {}
-  const snapshot = async id => {
-    const states = await api('/session/status')
-    return { id, busy: Boolean(states[id]?.type && states[id].type !== 'idle'), messages: await api(`/session/${id}/message`) }
-  }
-  const bridge = v2 ? new V2LifecycleBridge({ api: v2api, lifecycle, sessionID: '' }) : null
-  const recovery = new SessionRecovery({ snapshot, send: (id, body) => api(`/session/${id}/prompt_async`, { method: 'POST', body: JSON.stringify(body) }) })
+  const bridge = new V2LifecycleBridge({ api: v2api, lifecycle, sessionID: '' })
   let messageGate = Promise.resolve()
   const proxy = createServer(async (req, res) => {
     try {
-      if (v2 && req.method === 'GET' && req.url === '/omgithub/connect') {
+      if (req.method === 'GET' && req.url === '/omgithub/connect') {
         const origin = readFileSync(join(directory, 'web-url'), 'utf8').trim()
         const page = v2PairPage(origin, mainID())
         res.setHeader('content-type', 'text/html; charset=utf-8')
@@ -242,7 +218,7 @@ async function serve() {
         res.end(page)
         return
       }
-      if (v2 && req.method === 'GET' && req.url === '/omgithub/pair') {
+      if (req.method === 'GET' && req.url === '/omgithub/pair') {
         const pair = await v2api.pair()
         if (!/^[A-Za-z0-9_-]+$/.test(pair.code || '')) throw new Error('Invalid pairing code')
         res.setHeader('content-type', 'application/json')
@@ -253,25 +229,15 @@ async function serve() {
       if (req.url === '/omgithub/heartbeat') { await heartbeat(); res.end('ok'); return }
       if (req.url === '/omgithub/reconcile') { await reconcile(); res.end('ok'); return }
       if (req.url === '/omgithub/deployment') { res.setHeader('content-type', 'application/json'); res.end(readFileSync(join(directory, 'deployment-status.json'), 'utf8')); return }
-      if (v2 && isV2MainInterrupt(req.method, req.url, mainID())) { bridge.sessionID = mainID(); bridge.beforeInterrupt() }
-      if (v2 && isV2MainPrompt(req.method, req.url, mainID())) {
+      if (isV2MainInterrupt(req.method, req.url, mainID())) { bridge.sessionID = mainID(); bridge.beforeInterrupt() }
+      if (isV2MainPrompt(req.method, req.url, mainID())) {
         bridge.sessionID = mainID()
         const gate = messageGate.then(() => bridge.beforePrompt())
         messageGate = gate.catch(() => {})
         await gate
       }
-      if (!v2 && req.method === 'POST' && req.url.split('?')[0] === `/session/${mainID()}/abort`) recovery.cancel()
-      const match = req.url.match(/^\/session\/([^/?]+)\/(message|prompt_async|command)(?:\?|$)/)
-      if (!v2 && req.method === 'POST' && match?.[1] === mainID()) {
-        recovery.cancel(true)
-        const gate = messageGate.then(() => lifecycle.busy())
-        messageGate = gate.catch(() => {})
-        await gate
-      }
       const targetURL = `${upstream}${req.url}`
       const target = httpRequest(targetURL, { method: req.method, headers: req.headers }, reply => {
-        if (req.method === 'POST' && req.url.split('?')[0] === `/session/${mainID()}/abort` && reply.statusCode < 300)
-          reply.on('end', () => { void reconcile().catch(console.error) })
         res.writeHead(reply.statusCode, reply.headers); reply.pipe(res)
       })
       target.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end() })
@@ -309,7 +275,6 @@ async function serve() {
     events.abort()
     proxy.close()
     proxy.closeAllConnections()
-    recovery.cancel()
     clearInterval(heartbeatTimer)
     clearInterval(screenshotTimer)
     // Leave room for worker drain, the 120-second upload, and an ended callback.
@@ -326,42 +291,17 @@ async function serve() {
   async function reconcile() {
     const id = mainID()
     if (!id || lifecycle.stopping) return
-    if (v2) { bridge.sessionID = id; await bridge.reconcile(); return }
-    const current = await snapshot(id)
-    recovery.observe(current)
-    if (current.busy) return
-    const messageID = finishedMessage(current)
-    if (messageID) void lifecycle.complete(messageID).catch(console.error)
+    bridge.sessionID = id; await bridge.reconcile()
   }
   // Reconnect the event stream, not a checkpoint timer. Reconcile missed idle
   // events after reconnecting so the first quick response is not lost.
   while (!stopping) {
     try {
-      if (v2) {
-        for await (const event of v2api.events({ signal: events.signal })) {
-          if (event.type === 'server.connected') await reconcile()
-          bridge.sessionID = mainID()
-          if (bridge.sessionID) await bridge.observe(event)
-        }
-        if (!stopping) await new Promise(resolve => setTimeout(resolve, 1000))
-        continue
-      }
-      const response = await fetch(`${upstream}/event`, { headers: { 'x-opencode-directory': env.PROJECT_DIR }, signal: events.signal })
-      if (!response.ok || !response.body) throw new Error('Event stream unavailable')
       await reconcile()
-      let buffer = ''
-      for await (const chunk of response.body) {
-        buffer += Buffer.from(chunk).toString('utf8')
-        let end
-        while ((end = buffer.indexOf('\n\n')) >= 0) {
-          const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2)
-          const data = frame.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).join('\n')
-          if (!data) continue
-          const event = JSON.parse(data), id = event.properties?.sessionID
-          if (id !== mainID()) continue
-          if (event.type === 'session.status' && event.properties.status?.type === 'busy') { recovery.cancel(); void lifecycle.busy().catch(console.error) }
-          if (event.type === 'session.idle' || (event.type === 'session.status' && event.properties.status?.type === 'idle')) await reconcile()
-        }
+      for await (const event of v2api.events({ signal: events.signal })) {
+        if (event.type === 'server.connected') await reconcile()
+        bridge.sessionID = mainID()
+        if (bridge.sessionID) await bridge.observe(event)
       }
     } catch (error) { if (!stopping) console.error(error.message) }
     if (!stopping) await new Promise(resolve => setTimeout(resolve, 1000))

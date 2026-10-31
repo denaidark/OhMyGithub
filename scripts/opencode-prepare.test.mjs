@@ -107,14 +107,3 @@ test('reject invalid access, closed issues, pull requests, and invalid branches'
     await assert.rejects(f.run());
   }
 });
-
-test('freeze the requested OpenCode major version and default new issues to V2', async () => {
-  const f = fixture({ env: { GITHUB_REF: 'refs/heads/feature' } }); f.event.action = 'opened'
-  assert.equal((await f.run()).opencode_version, '2')
-  f.state.current.body = 'Build it\n\n<!-- omgithub-request:v1 {"branch":"feature","opencode_version":"1"} -->'
-  const result = await f.run()
-  assert.equal(result.opencode_version, '1')
-  assert.equal(result.request, 'Build it')
-  f.state.current.body = 'Build it\n\n<!-- omgithub-request:v1 {"branch":"feature","opencode_version":"3"} -->'
-  await assert.rejects(f.run(), /OpenCode version/)
-})

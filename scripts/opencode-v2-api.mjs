@@ -1,4 +1,4 @@
-// Keep V2's API contract separate from the production V1 lifecycle.
+// Share the OpenCode session and event contract across production controllers.
 const idPattern = /^ses_[A-Za-z0-9]+$/
 const messagePattern = /^msg_[A-Za-z0-9]+$/
 
@@ -88,7 +88,7 @@ export function finishedV2Message(snapshot, { allowInterrupted = false } = {}) {
   if (first?.type !== 'idle' || !['succeeded', ...(allowInterrupted ? ['interrupted'] : [])].includes(first.outcome)) return null
   const latest = snapshot.messages.find(message => message.type === 'assistant' || message.type === 'user')
   // V2 can interrupt before the assistant message exists. Keep the user prompt
-  // checkpointable, as V1 does when a response is aborted.
+  // checkpointable after a response is aborted.
   if (first.outcome === 'interrupted') return messagePattern.test(latest?.id || '') ? latest.id : null
   // A stopped turn is terminal once the idle marker says interrupted; the
   // projected assistant may carry an aborted error or none at all.

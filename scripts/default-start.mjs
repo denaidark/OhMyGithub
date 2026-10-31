@@ -34,7 +34,7 @@ export async function start(root = process.cwd()) {
       const installedHash = createHash('sha256').update(readFileSync(join(root, 'package.json'))).update(existsSync(lock) ? readFileSync(lock) : '').digest('hex')
       writeFileSync(stamp, installedHash)
     }
-    await child(process.execPath, [join(root, 'node_modules/vite/bin/vite.js'), 'build'], { cwd: root })
+    await child(process.execPath, [join(root, 'node_modules/vite/bin/vite.js'), 'build', '--base', './'], { cwd: root })
     root = join(root, 'dist')
   }
   if (!existsSync(join(root, 'index.html'))) throw new Error('Static deployment output must contain index.html.')
@@ -43,7 +43,7 @@ export async function start(root = process.cwd()) {
   const clients = new Set()
   const stopWatching = watchProject(root, () => { for (const client of clients) client.write('event: change\ndata: changed\n\n') })
   const keepAlive = setInterval(() => { for (const client of clients) client.write(': keepalive\n\n') }, 20000)
-  const buildWatcher = type === 'vite' ? spawn(process.execPath, [join(projectRoot, 'node_modules/vite/bin/vite.js'), 'build', '--watch'], { cwd: projectRoot, stdio: 'inherit' }) : null
+  const buildWatcher = type === 'vite' ? spawn(process.execPath, [join(projectRoot, 'node_modules/vite/bin/vite.js'), 'build', '--base', './', '--watch'], { cwd: projectRoot, stdio: 'inherit' }) : null
   const server = createServer((req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost')
