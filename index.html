@@ -33,6 +33,28 @@
     box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
     touch-action: none;
   }
+  .scoreboard {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 10px;
+    margin: 0 0 14px;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #7d8f9e;
+  }
+  .scoreboard b {
+    min-width: 1.4em;
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1;
+    color: #e2ecf5;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+  .scoreboard .you { color: #4ade80; }
+  .scoreboard .cpu { color: #f472b6; }
   .hint { margin: 16px 0 0; color: #7d8f9e; }
   kbd {
     display: inline-block;
@@ -51,6 +73,13 @@
 <body>
 <main>
   <h1>Mini Pong</h1>
+  <div class="scoreboard" aria-live="polite">
+    <span class="you">You</span>
+    <b id="player-score">0</b>
+    <span>:</span>
+    <b id="cpu-score">0</b>
+    <span class="cpu">CPU</span>
+  </div>
   <canvas id="game" width="720" height="480" aria-label="Pong game: first to 7 points"></canvas>
   <p class="hint">
     <kbd>W</kbd>/<kbd>&uarr;</kbd> up &middot; <kbd>S</kbd>/<kbd>&darr;</kbd> down &middot;
@@ -92,6 +121,13 @@
   };
 
   const keys = new Set();
+  const playerScoreEl = document.getElementById('player-score');
+  const cpuScoreEl = document.getElementById('cpu-score');
+
+  function updateScoreboard() {
+    playerScoreEl.textContent = state.score.player;
+    cpuScoreEl.textContent = state.score.cpu;
+  }
 
   function resetBall() {
     ball.x = W / 2;
@@ -118,6 +154,7 @@
     player.y = H / 2 - PADDLE_H / 2;
     cpu.y = H / 2 - PADDLE_H / 2;
     resetBall();
+    updateScoreboard();
   }
 
   function togglePause() {
@@ -139,6 +176,7 @@
   function scorePoint(forPlayer) {
     if (forPlayer) state.score.player++;
     else state.score.cpu++;
+    updateScoreboard();
 
     if (state.score.player >= WIN_SCORE || state.score.cpu >= WIN_SCORE) {
       state.winner = state.score.player >= WIN_SCORE ? 'player' : 'cpu';
