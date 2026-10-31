@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
-test('use callback credentials only for OmGithub callbacks; resolve release without GitHub REST', () => {
+test('use callback credentials only for OmGithub callbacks; install the pinned v2 runtime without GitHub REST', () => {
   const workflow = read('.github/workflows/opencode-reusable.yml')
   assert.doesNotMatch(workflow, /api\.github\.com\/repos\/anomalyco\/opencode\/releases/)
-  assert.match(workflow, /url_effective.*https:\/\/github.com\/anomalyco\/opencode\/releases\/latest/)
+  assert.match(workflow, /https:\/\/opencode\.ai\/v2\/install/)
+  assert.match(workflow, /OPENCODE_VERSION="\$\{RESUME_OPENCODE_VERSION:-2\.2\.2\}"/)
   assert.match(workflow, /name: Register Actions progress\n        continue-on-error: true/)
   for (const name of ['run-record.mjs', 'session-deploy.mjs', 'session-lifecycle.mjs']) {
     const code = read(`scripts/${name}`)
@@ -30,7 +31,7 @@ test('report failed execution before the debug hold keeps Actions running', () =
   assert.ok(early > 0 && early < hold && hold < final)
   const step = workflow.slice(early, hold)
   assert.match(step, /if: failure\(\)/)
-  assert.match(step, /"outcome\\":\\"failure\\"/)
+  assert.match(step, /run-failure\.mjs" --payload/)
   assert.match(step, /issues\/\$TRIGGER_ISSUE_NUMBER\/run/)
 })
 

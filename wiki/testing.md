@@ -396,3 +396,9 @@ Reproduce Greywatch issue 1 with its pinned snapshot; require deployment and des
 ## Regress oversized checkpoint publication
 
 Run `node --test scripts/session-checkpoint.test.mjs`. Verify a conversation above 25 MiB uploads as gzip, restores every message and part, and deduplicates unchanged saves. Keep the full conversation within the 128 MiB limit. Download managed restore payloads to a temporary file and remove it after parsing.
+
+## Diagnose provider quota failures
+
+Read the runner's `opencode-run.log` before blaming browser transport or checkpoint storage. After shutdown, read the `opencode-run.log` asset from the run's `opencode-logs-<run>` release. Inspect `type: error` events and `provider.free-limit` status 429. Use [codex-app-dev/PlayGround#10](https://github.com/codex-app-dev/PlayGround/issues/10) as the quota example; issues 6–10 stopped before generating code on the free endpoint.
+
+Print a bounded, categorized reason in the failed Actions step and include that reason in the terminal OmGithub run callback before the debug hold. Keep raw provider response bodies out of status messages. Connect an account provider or select a model with available quota; avoid repeated retries against an exhausted free endpoint. Inspect the worker's own quota response rather than assuming the limit belongs to the GitHub account.

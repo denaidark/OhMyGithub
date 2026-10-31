@@ -987,7 +987,10 @@ jobs:
             /usr/bin/time -p sleep 1
           done
           [[ -f "$OPENCODE_WEB_DIR/opencode-run.exit" ]]
-          [[ "$(cat "$OPENCODE_WEB_DIR/opencode-run.exit")" == 0 ]]
+          if [[ "$(cat "$OPENCODE_WEB_DIR/opencode-run.exit")" != 0 ]]; then
+            /usr/bin/time -p node "$RUNTIME_DIR/scripts/run-failure.mjs" --summary >&2
+            exit 1
+          fi
 
       - name: Verify synthetic production delivery
         if: env.TEST_REQUEST == 'true' && env.SSH_ONLY_REQUEST != 'true'
@@ -1098,10 +1101,12 @@ jobs:
         run: |
           set -euo pipefail
           sequence=$(/usr/bin/time -p node -p 'Date.now()')
+          payload=$(/usr/bin/time -p node "$RUNTIME_DIR/scripts/run-failure.mjs" --payload "$sequence")
           /usr/bin/time -p curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
             -H "Authorization: Bearer $OMGITHUB_CALLBACK_TOKEN" -H 'Content-Type: application/json' \
-            --data "{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":$sequence,\"state\":\"ended\",\"phase\":\"building\",\"outcome\":\"failure\"}" \
+            --data "$payload" \
             "$OMGITHUB_ORIGIN/api/github/$GITHUB_REPOSITORY/issues/$TRIGGER_ISSUE_NUMBER/run"
+
 
       - name: Release account credentials before debug hold
         if: always()
