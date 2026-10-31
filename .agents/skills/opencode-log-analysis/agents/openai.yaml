@@ -1,3 +1,0 @@
-interface:
-  display_name: "OpenCode Log Analysis"
-  short_description: "Analyze OpenCode logs and propose prompt changes"
