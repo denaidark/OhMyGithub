@@ -188,8 +188,6 @@ jobs:
         run: |
           set -euo pipefail
           /usr/bin/time -p node "$RUNTIME_DIR/scripts/account-credentials.mjs" load
-          nohup node "$RUNTIME_DIR/scripts/account-credentials.mjs" watch > "$RUNNER_TEMP/omgithub-account-auth-sync.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/omgithub-account-auth-sync.pid"
 
       - name: Prepare selected remix snapshot
         timeout-minutes: 15
@@ -589,7 +587,7 @@ jobs:
         run: |
           set -euo pipefail
           install -d -m 700 "$OPENCODE_WEB_DIR"
-          OPENCODE_VERSION="${RESUME_OPENCODE_VERSION:-2.2.2}"
+          OPENCODE_VERSION="$(/usr/bin/time -p node "$RUNTIME_DIR/scripts/latest-opencode-version.mjs")"
           [[ "$OPENCODE_VERSION" =~ ^2\.[0-9]+\.[0-9]+$ ]]
           /usr/bin/time -p curl --fail --silent --show-error --location https://opencode.ai/v2/install -o "$OPENCODE_WEB_DIR/install-v2.sh"
           /usr/bin/time -p bash "$OPENCODE_WEB_DIR/install-v2.sh" --version "$OPENCODE_VERSION" --no-modify-path
@@ -600,6 +598,9 @@ jobs:
           export PATH="$HOME/.opencode/bin:$PATH"
           printf '%s\n' "$HOME/.opencode/bin" >> "$GITHUB_PATH"
           /usr/bin/time -p sudo -n ln -sfn "$OPENCODE_BIN" /usr/local/bin/opencode
+          actual_version="$(/usr/bin/time -p "$OPENCODE_BIN" --version)"
+          [[ "$actual_version" == "opencode v$OPENCODE_VERSION" ]]
+          printf 'Resolved latest stable OpenCode: %s\n' "$actual_version"
           /usr/bin/time -p opencode --version
           /usr/bin/time -p env PATH=/usr/local/bin:/usr/bin:/bin /bin/bash -c 'command -v opencode; opencode --version'
           install -d -m 700 "$HOME/.config/opencode"
@@ -682,6 +683,11 @@ jobs:
           done
           [[ "$healthy" == true ]] || { echo 'OpenCode V2 server did not become healthy' >&2; exit 1; }
 
+          export OPENCODE_WEB_PORT
+          /usr/bin/time -p node "$RUNTIME_DIR/scripts/account-credentials.mjs" install-console
+          nohup node "$RUNTIME_DIR/scripts/account-credentials.mjs" watch > "$RUNNER_TEMP/omgithub-account-auth-sync.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/omgithub-account-auth-sync.pid"
+
           export PROJECT_FILE_PORT
           /usr/bin/time -p bash "$RUNTIME_DIR/scripts/start-live-files.sh"
           echo 'Tunnel OpenCode, live source files, and final preview independently'
@@ -761,7 +767,7 @@ jobs:
             }
             // Free OpenCode models get retired (the API then answers "ModelDeprecated" and
             // OpenCode reports "Unexpected server error"). Pick a live default from the catalog.
-            const preferred = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle'];
+            const { preferredFreeModels: preferred, modelCandidates } = await import(`${process.env.RUNTIME_DIR}/scripts/run-with-model-fallback.mjs`);
             let live = null;
             try {
               const catalog = await (await fetch('https://models.opencode.ai/api.json', { signal: AbortSignal.timeout(15000) })).json();
@@ -779,9 +785,10 @@ jobs:
             const skills = names.filter((name) => name.startsWith('skill/'))
               .map((name) => name.slice('skill/'.length)).sort();
             core.setOutput('model', model);
+            core.setOutput('models_json', JSON.stringify(modelCandidates(model, live)));
             core.setOutput('variant', ['openai/gpt-6.1-sol', 'openai/gpt-6-astra'].includes(model) ? 'high' : '');
             core.setOutput('skills_json', JSON.stringify(skills));
-            core.info(`Resolved model=${model}; skills=${skills.join(', ') || '(none)'}`);
+            core.info(`Resolved model=${model}; sequence=${modelCandidates(model, live).join(' → ')}; skills=${skills.join(', ') || '(none)'}`);
 
       - name: Restore saved OpenCode conversation
         if: env.RESUME_CHECKPOINT_FILE != '' && env.TEST_REQUEST != 'true' && env.SSH_ONLY_REQUEST != 'true'
@@ -851,6 +858,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OPENCODE_WEB_URL: ${{ steps.opencode_web.outputs.url }}
           OPENCODE_MODEL: ${{ steps.opencode_labels.outputs.model }}
+          OPENCODE_MODELS_JSON: ${{ steps.opencode_labels.outputs.models_json }}
           OPENCODE_VARIANT: ${{ steps.opencode_labels.outputs.variant }}
           OPENCODE_SKILLS: ${{ steps.opencode_labels.outputs.skills_json }}
           GOAL_REQUEST: ${{ env.GOAL_REQUEST }}
@@ -879,31 +887,8 @@ jobs:
             prompt="${prompt//@SKILL_TEXT@/$skill_text}"
             printf '%s\n' "$prompt" > "$PROMPT_FILE"
           fi
-          # The inner shell expands the positional parameters after nohup starts.
-          # shellcheck disable=SC2016
-          nohup bash -c '
-            resume_args=()
-            [[ -n "${RESUME_SESSION_ID:-}" ]] && resume_args=(--session "$RESUME_SESSION_ID")
-            cd "$PROJECT_DIR" || exit 1
-            exact_prompt="$(cat "$3"; printf .)"
-            exact_prompt="${exact_prompt%.}"
-            "$1" run "${resume_args[@]}" --auto --server "http://127.0.0.1:$2" --model "$6" --format json "$exact_prompt" > "$4" 2>&1
-            code=$?
-            if [[ "$code" != 0 && -n "${OPENROUTER_API_KEY:-}" ]] && grep -Eiq "FreeUsageLimit|rate.limit|HTTP.?429" "$4"; then
-              fallback_session="$(node "$RUNTIME_DIR/scripts/v2-log-session.mjs" "$4")"
-              [[ -n "$fallback_session" ]] && resume_args=(--session "$fallback_session")
-              printf "%s\n" "openrouter/cohere/north-mini-code:free" > "$OPENCODE_WEB_DIR/main-model"
-              echo "Retrying the rate-limited request with the connected OpenRouter provider" >> "$4"
-              "$1" run "${resume_args[@]}" --auto --server "http://127.0.0.1:$2" --model "openrouter/cohere/north-mini-code:free" --format json "$exact_prompt" >> "$4" 2>&1
-            else
-              (exit "$code")
-            fi
-
-            code=$?
-            echo "$code" > "$5"
-            exit "$code"
-          ' \
-            _ "$OPENCODE_BIN" "$OPENCODE_WEB_PORT" "$PROMPT_FILE" "$RUN_LOG" "$RUN_EXIT" "$OPENCODE_MODEL" \
+          nohup node "$RUNTIME_DIR/scripts/run-with-model-fallback.mjs" \
+            "$OPENCODE_BIN" "$OPENCODE_WEB_PORT" "$PROMPT_FILE" "$RUN_LOG" "$RUN_EXIT" "$OPENCODE_MODEL" \
             > /dev/null 2>&1 &
           echo $! > "$OPENCODE_WEB_DIR/opencode-run.pid"
           fi
@@ -987,10 +972,13 @@ jobs:
             /usr/bin/time -p sleep 1
           done
           [[ -f "$OPENCODE_WEB_DIR/opencode-run.exit" ]]
-          [[ "$(cat "$OPENCODE_WEB_DIR/opencode-run.exit")" == 0 ]]
+          if [[ "$(cat "$OPENCODE_WEB_DIR/opencode-run.exit")" != 0 ]]; then
+            /usr/bin/time -p node "$RUNTIME_DIR/scripts/run-failure.mjs" --summary >&2
+            exit 1
+          fi
 
-      - name: Verify synthetic production delivery
-        if: env.TEST_REQUEST == 'true' && env.SSH_ONLY_REQUEST != 'true'
+      - name: Wait for production delivery
+        if: env.SSH_ONLY_REQUEST != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1098,10 +1086,15 @@ jobs:
         run: |
           set -euo pipefail
           sequence=$(/usr/bin/time -p node -p 'Date.now()')
+          payload="{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":$sequence,\"state\":\"ended\",\"phase\":\"building\",\"outcome\":\"failure\",\"reason\":\"The build workflow failed before model diagnostics were available. Open the workflow logs for details.\"}"
+          if [[ -f "$RUNTIME_DIR/scripts/run-failure.mjs" ]]; then
+            payload=$(/usr/bin/time -p node "$RUNTIME_DIR/scripts/run-failure.mjs" --payload "$sequence")
+          fi
           /usr/bin/time -p curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
             -H "Authorization: Bearer $OMGITHUB_CALLBACK_TOKEN" -H 'Content-Type: application/json' \
-            --data "{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":$sequence,\"state\":\"ended\",\"phase\":\"building\",\"outcome\":\"failure\"}" \
+            --data "$payload" \
             "$OMGITHUB_ORIGIN/api/github/$GITHUB_REPOSITORY/issues/$TRIGGER_ISSUE_NUMBER/run"
+
 
       - name: Release account credentials before debug hold
         if: always()
