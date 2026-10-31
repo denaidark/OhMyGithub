@@ -227,3 +227,21 @@ If you believe software should start with a sentence instead of a sprint plan, [
 **Built with GitHub Actions, OpenCode, shared skills, and unreasonable optimism.** 😏
 
 </div>
+
+<!-- omgithub:readme:start -->
+## 🚀 Build, play, and remix with OMGithub
+
+**Remixed using [OMGithub.com](https://omgithub.com).**
+
+[![OMGithub](https://img.shields.io/badge/OMGithub-Open%20project-orange?style=for-the-badge)](https://omgithub.com/denaidark/OhMyGithub)
+[![GitHub](https://img.shields.io/badge/GitHub-Source-181717?logo=github&style=for-the-badge)](https://github.com/denaidark/OhMyGithub)
+
+- 🎮 [Open the project](https://omgithub.com/denaidark/OhMyGithub).
+- ✨ [Remix this project](https://omgithub.com/?remix=denaidark%2FOhMyGithub).
+- 💻 [Explore the source](https://github.com/denaidark/OhMyGithub).
+- 🛠️ [Check build runs](https://github.com/denaidark/OhMyGithub/actions).
+- 🐛 [Report an issue](https://github.com/denaidark/OhMyGithub/issues).
+- 👤 [Explore the creator's projects](https://omgithub.com/denaidark).
+- 🌍 [Create with OMGithub](https://omgithub.com).
+- 🧬 [Explore the remix source](https://github.com/denaidark/OhMyGithub).
+<!-- omgithub:readme:end -->
