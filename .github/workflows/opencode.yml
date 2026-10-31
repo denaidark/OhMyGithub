@@ -11,11 +11,7 @@ on:
         required: true
         type: string
 
-permissions:
-  id-token: write
-  contents: write
-  issues: write
-  actions: write
+permissions: {}
 
 concurrency:
   group: opencode-issue-${{ github.repository }}-${{ github.event.issue.number || inputs.issue_number }}
@@ -23,21 +19,28 @@ concurrency:
 
 jobs:
   prepare:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'OpenCode')
-    uses: ./.github/workflows/opencode-prepare.yml
+    if: github.event_name == 'workflow_dispatch' || (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'OpenCode'))
+    permissions:
+      contents: write
+      id-token: write
+      issues: write
+      actions: write
+    uses: denaidark/OhMyGithub/.github/workflows/opencode-prepare.yml@e83463d572c6506fd6c947b3e19e11dbe8057fd0
     with:
-      runtime_ref: ${{ github.workflow_sha }}
+      runtime_ref: e83463d572c6506fd6c947b3e19e11dbe8057fd0
+
   opencode:
     needs: prepare
     if: needs.prepare.outputs.approved == 'true'
-    uses: ./.github/workflows/opencode-reusable.yml
     permissions:
-      id-token: write
       contents: write
+      id-token: write
       issues: write
       actions: read
+      pull-requests: write
+    uses: denaidark/OhMyGithub/.github/workflows/opencode-reusable.yml@e83463d572c6506fd6c947b3e19e11dbe8057fd0
     with:
-      runtime_ref: ${{ github.workflow_sha }}
+      runtime_ref: e83463d572c6506fd6c947b3e19e11dbe8057fd0
       issue_number: ${{ needs.prepare.outputs.issue_number }}
       request: ${{ needs.prepare.outputs.request }}
       issue_title: ${{ needs.prepare.outputs.issue_title }}
@@ -45,4 +48,8 @@ jobs:
       sender: ${{ needs.prepare.outputs.sender }}
       target_ref: ${{ needs.prepare.outputs.target_ref }}
       target_sha: ${{ needs.prepare.outputs.target_sha }}
-    secrets: inherit
+    secrets:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+      AGENTSWEB_SSH_PUBLIC_KEY: ${{ secrets.AGENTSWEB_SSH_PUBLIC_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
