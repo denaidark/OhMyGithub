@@ -68,7 +68,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     root: process.env.PROJECT_DIR,
     port: Number(process.env.PROJECT_FILE_PORT),
     cacheDir: join(process.env.OPENCODE_WEB_DIR, 'live-vite-cache'),
-    allowedHosts: ['.trycloudflare.com']
+    allowedHosts: ['.omgithub.com']
   })
   console.error(`[timing] live source server startup: ${Math.round(performance.now() - started)} ms`)
   server.printUrls()

@@ -353,3 +353,7 @@ Run `node --test scripts/wip-screenshots.test.mjs`. Run `scripts/test-wip-captur
 ## Inherit account MCP connections
 
 Load the MCP configuration returned by account credential checkout before starting OpenCode. Merge account servers into `OPENCODE_CONFIG_CONTENT`; retain explicit workflow entries. Mask run gateway credentials. Keep provider tokens in OmGithub. Retain MCP access until main and validation work settle, including MCP-only runs. Revoke gateway grants during release. Run `node --test scripts/account-credentials.test.mjs` after changing this flow.
+
+## Route execution through named tunnels
+
+Run `scripts/worker-tunnel.mjs start` after callback authentication and controller startup. Provision one tunnel for each run and attempt through OmGithub. Route OC, Files, and Live on independent omgithub.com hostnames. Read the resulting URLs from the runtime markers. Run `scripts/worker-tunnel.mjs stop` during final cleanup. Verify an actual paired browser message and continuous event delivery; treat a healthy HTML page as readiness only.

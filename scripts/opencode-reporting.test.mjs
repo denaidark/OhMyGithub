@@ -3,12 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const workflow = readFileSync(new URL('../.github/workflows/opencode-reusable.yml', import.meta.url), 'utf8');
-test('all tunnel parsers ignore API errors and select ready-box URLs', () => {
-  const parsers = [...workflow.matchAll(/sed -nE '([^']+)'/g)].map(m => m[1]).filter(s => s.includes('trycloudflare'));
-  assert.equal(parsers.length, 3);
-  for (const parser of parsers) {
-    assert.equal(execFileSync('sed', ['-nE', parser], { input: 'ERR https://api.trycloudflare.com/tunnel\nINF | https://worker-name.trycloudflare.com |\n', encoding: 'utf8' }).trim(), 'https://worker-name.trycloudflare.com');
-  }
+test('workflow starts one named worker tunnel', () => {
+  assert.match(workflow, /worker-tunnel\.mjs" start/);
+  assert.doesNotMatch(workflow, /--url "http:\/\/127\.0\.0\.1:\$(?:OPENCODE_CONTROL_PORT|APP_PORT|PROJECT_FILE_PORT)/);
 });
 test('failure reporting attempts every operation despite earlier API failures', async () => {
   const block = workflow.split('      - name: Mark issue failed')[1].split('      - name:')[0];
@@ -38,7 +35,7 @@ test('keeps checkpoints on main and starts restored preview before model executi
   assert.ok(workflow.indexOf('name: Start saved app before OpenCode') < workflow.indexOf('name: Run OpenCode and locate'));
   assert.ok(workflow.indexOf('name: Publish restored preview') < workflow.indexOf('name: Run OpenCode and locate'));
   assert.match(workflow, /name: Wait for main OpenCode completion/);
-  assert.equal((workflow.match(/echo \$! > "\$OPENCODE_WEB_DIR\/app-cloudflared.pid"/g) || []).length, 1);
+  assert.match(workflow, /worker-tunnel\.mjs" start/);
 });
 test('asks OpenCode to generate and test the portable startup script during verification', () => {
   const prompt = readFileSync(new URL('../.github/prompts/02-verify.md', import.meta.url), 'utf8');

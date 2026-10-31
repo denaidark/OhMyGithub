@@ -785,48 +785,8 @@ jobs:
           export GH_TOKEN='${{ github.token }}'
           nohup node "$RUNTIME_DIR/scripts/session-lifecycle.mjs" > "$OPENCODE_WEB_DIR/lifecycle.log" 2>&1 &
           printf '%s\n' "$!" > "$OPENCODE_WEB_DIR/lifecycle.pid"
-          nohup "$OPENCODE_WEB_DIR/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$OPENCODE_CONTROL_PORT" \
-            > "$OPENCODE_WEB_DIR/cloudflared.log" 2>&1 &
-          echo $! > "$OPENCODE_WEB_DIR/cloudflared.pid"
-          nohup "$OPENCODE_WEB_DIR/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$APP_PORT" \
-            > "$OPENCODE_WEB_DIR/app-cloudflared.log" 2>&1 &
-          echo $! > "$OPENCODE_WEB_DIR/app-cloudflared.pid"
-          nohup "$OPENCODE_WEB_DIR/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$PROJECT_FILE_PORT" \
-            > "$OPENCODE_WEB_DIR/files-cloudflared.log" 2>&1 &
-          echo $! > "$OPENCODE_WEB_DIR/files-cloudflared.pid"
-          web_retries=0; app_retries=0; files_retries=0
-          for _ in {1..90}; do
-            for tunnel in web app files; do
-              case "$tunnel" in
-                web) prefix="cloudflared"; port="$OPENCODE_CONTROL_PORT"; retries="$web_retries" ;;
-                files) prefix="files-cloudflared"; port="$PROJECT_FILE_PORT"; retries="$files_retries" ;;
-                app) prefix="app-cloudflared"; port="$APP_PORT"; retries="$app_retries" ;;
-              esac
-              if ! kill -0 "$(cat "$OPENCODE_WEB_DIR/$prefix.pid")" 2>/dev/null && [[ "$retries" -lt 2 ]]; then
-                /usr/bin/time -p sleep 2
-                nohup "$OPENCODE_WEB_DIR/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$port" > "$OPENCODE_WEB_DIR/$prefix.log" 2>&1 &
-                printf '%s\n' "$!" > "$OPENCODE_WEB_DIR/$prefix.pid"
-                case "$tunnel" in
-                  web) web_retries=$((web_retries + 1)) ;;
-                  files) files_retries=$((files_retries + 1)) ;;
-                  app) app_retries=$((app_retries + 1)) ;;
-                esac
-              fi
-            done
-            WEB_URL="$(sed -nE 's#^[^|]*\|[[:space:]]*(https://[a-z0-9-]+\.trycloudflare\.com)[[:space:]]*\|.*$#\1#p' "$OPENCODE_WEB_DIR/cloudflared.log" | head -n 1)"
-            APP_URL="$(sed -nE 's#^[^|]*\|[[:space:]]*(https://[a-z0-9-]+\.trycloudflare\.com)[[:space:]]*\|.*$#\1#p' "$OPENCODE_WEB_DIR/app-cloudflared.log" | head -n 1)"
-            FILES_URL="$(sed -nE 's#^[^|]*\|[[:space:]]*(https://[a-z0-9-]+\.trycloudflare\.com)[[:space:]]*\|.*$#\1#p' "$OPENCODE_WEB_DIR/files-cloudflared.log" | head -n 1)"
-            [[ -n "$WEB_URL" && -n "$APP_URL" && -n "$FILES_URL" ]] && break
-            sleep 1
-          done
-          PROJECT_URL="${FILES_URL:+$FILES_URL/}"
-          /usr/bin/time -p printf '%s' "$PROJECT_URL" > "$OPENCODE_WEB_DIR/files-url"
-          printf '%s' "$WEB_URL" > "$OPENCODE_WEB_DIR/web-url"
-          printf '%s' "$APP_URL" > "$OPENCODE_WEB_DIR/app-url"
+          /usr/bin/time -p node "$RUNTIME_DIR/scripts/worker-tunnel.mjs" start
           /usr/bin/time -p curl --fail --silent "http://127.0.0.1:$OPENCODE_CONTROL_PORT/omgithub/heartbeat"
-          echo "APP_URL=$APP_URL" >> "$GITHUB_ENV"
-          printf 'url=%s\nproject_url=%s\n' "$WEB_URL" "$PROJECT_URL" >> "$GITHUB_OUTPUT"
-          [[ -n "${WEB_URL:-}" && -n "${PROJECT_URL:-}" && -n "${APP_URL:-}" ]] || { echo '::error::A preview tunnel failed after three attempts.'; exit 1; }
 
       - name: Configure Git identity
         if: env.SSH_ONLY_REQUEST != 'true'
@@ -1394,13 +1354,14 @@ jobs:
           if [[ -f "$RUNTIME_DIR/scripts/stop-lifecycle.mjs" ]]; then
             /usr/bin/time -p node "$RUNTIME_DIR/scripts/stop-lifecycle.mjs"
           fi
+          if [[ -f "$RUNTIME_DIR/scripts/worker-tunnel.mjs" ]]; then
+            /usr/bin/time -p node "$RUNTIME_DIR/scripts/worker-tunnel.mjs" stop
+          fi
           [[ -f "$OPENCODE_WEB_DIR/cloudflared.pid" ]] && kill "$(cat "$OPENCODE_WEB_DIR/cloudflared.pid")" 2>/dev/null || true
           [[ -f "$OPENCODE_WEB_DIR/live-files.pid" ]] && /usr/bin/time -p kill "$(cat "$OPENCODE_WEB_DIR/live-files.pid")" 2>/dev/null || true
-          [[ -f "$OPENCODE_WEB_DIR/files-cloudflared.pid" ]] && /usr/bin/time -p kill "$(cat "$OPENCODE_WEB_DIR/files-cloudflared.pid")" 2>/dev/null || true
           [[ -f "$OPENCODE_WEB_DIR/opencode.pid" ]] && kill "$(cat "$OPENCODE_WEB_DIR/opencode.pid")" 2>/dev/null || true
           [[ -f "$OPENCODE_WEB_DIR/opencode-run.pid" ]] && kill "$(cat "$OPENCODE_WEB_DIR/opencode-run.pid")" 2>/dev/null || true
           [[ -f "$OPENCODE_WEB_DIR/response-comment-tracker.pid" ]] && kill "$(cat "$OPENCODE_WEB_DIR/response-comment-tracker.pid")" 2>/dev/null || true
-          [[ -f "$OPENCODE_WEB_DIR/app-cloudflared.pid" ]] && kill "$(cat "$OPENCODE_WEB_DIR/app-cloudflared.pid")" 2>/dev/null || true
           [[ -f "$OPENCODE_WEB_DIR/app.pid" ]] && kill "$(cat "$OPENCODE_WEB_DIR/app.pid")" 2>/dev/null || true
           tmux kill-session -t app-server 2>/dev/null || true
           [[ -f "$SSH_DIR/tunnel.pid" ]] && kill "$(cat "$SSH_DIR/tunnel.pid")" 2>/dev/null || true
