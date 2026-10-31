@@ -188,8 +188,6 @@ jobs:
         run: |
           set -euo pipefail
           /usr/bin/time -p node "$RUNTIME_DIR/scripts/account-credentials.mjs" load
-          nohup node "$RUNTIME_DIR/scripts/account-credentials.mjs" watch > "$RUNNER_TEMP/omgithub-account-auth-sync.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/omgithub-account-auth-sync.pid"
 
       - name: Prepare selected remix snapshot
         timeout-minutes: 15
@@ -589,7 +587,7 @@ jobs:
         run: |
           set -euo pipefail
           install -d -m 700 "$OPENCODE_WEB_DIR"
-          OPENCODE_VERSION="${RESUME_OPENCODE_VERSION:-2.2.2}"
+          OPENCODE_VERSION="$(/usr/bin/time -p node "$RUNTIME_DIR/scripts/latest-opencode-version.mjs")"
           [[ "$OPENCODE_VERSION" =~ ^2\.[0-9]+\.[0-9]+$ ]]
           /usr/bin/time -p curl --fail --silent --show-error --location https://opencode.ai/v2/install -o "$OPENCODE_WEB_DIR/install-v2.sh"
           /usr/bin/time -p bash "$OPENCODE_WEB_DIR/install-v2.sh" --version "$OPENCODE_VERSION" --no-modify-path
@@ -600,6 +598,9 @@ jobs:
           export PATH="$HOME/.opencode/bin:$PATH"
           printf '%s\n' "$HOME/.opencode/bin" >> "$GITHUB_PATH"
           /usr/bin/time -p sudo -n ln -sfn "$OPENCODE_BIN" /usr/local/bin/opencode
+          actual_version="$(/usr/bin/time -p "$OPENCODE_BIN" --version)"
+          [[ "$actual_version" == "opencode v$OPENCODE_VERSION" ]]
+          printf 'Resolved latest stable OpenCode: %s\n' "$actual_version"
           /usr/bin/time -p opencode --version
           /usr/bin/time -p env PATH=/usr/local/bin:/usr/bin:/bin /bin/bash -c 'command -v opencode; opencode --version'
           install -d -m 700 "$HOME/.config/opencode"
@@ -681,6 +682,11 @@ jobs:
             sleep 1
           done
           [[ "$healthy" == true ]] || { echo 'OpenCode V2 server did not become healthy' >&2; exit 1; }
+
+          export OPENCODE_WEB_PORT
+          /usr/bin/time -p node "$RUNTIME_DIR/scripts/account-credentials.mjs" install-console
+          nohup node "$RUNTIME_DIR/scripts/account-credentials.mjs" watch > "$RUNNER_TEMP/omgithub-account-auth-sync.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/omgithub-account-auth-sync.pid"
 
           export PROJECT_FILE_PORT
           /usr/bin/time -p bash "$RUNTIME_DIR/scripts/start-live-files.sh"

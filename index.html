@@ -74,6 +74,27 @@
   button:active { transform: scale(.97); }
   button:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
   .hint { margin: 18px 0 0; font-size: .85rem; color: #7f8ab3; }
+  .verified {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 16px 0 0;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(74, 222, 128, .1);
+    border: 1px solid rgba(74, 222, 128, .35);
+    color: #86efac;
+    font-size: .78rem;
+    font-weight: 600;
+  }
+  .verified::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4ade80;
+    box-shadow: 0 0 8px #4ade80;
+  }
 </style>
 </head>
 <body>
@@ -82,6 +103,7 @@
   <div class="score" id="score" aria-live="polite">0</div>
   <button id="add" type="button">Add point</button>
   <p class="hint">Every click counts.</p>
+  <p class="verified">Latest runtime verified.</p>
 </main>
 <script>
   const scoreEl = document.getElementById('score')
