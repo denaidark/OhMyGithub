@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Click Counter</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%235b8cff'/%3E%3Ctext x='32' y='46' font-family='sans-serif' font-size='40' font-weight='bold' fill='white' text-anchor='middle'%3E0%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b1020;
+    --panel: #141b34;
+    --accent: #5b8cff;
+    --accent-2: #8f6bff;
+    --text: #e8ecff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(circle at 20% 0%, #1c2a5e 0%, var(--bg) 55%, #05070f 100%);
+    color: var(--text);
+    padding: 24px;
+  }
+  main {
+    width: min(420px, 100%);
+    background: linear-gradient(160deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 24px;
+    padding: 40px 32px;
+    text-align: center;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45);
+    backdrop-filter: blur(8px);
+  }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 1.05rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: #a8b6e8;
+  }
+  .score {
+    font-size: clamp(4.5rem, 22vw, 7rem);
+    line-height: 1;
+    font-weight: 800;
+    margin: 16px 0 28px;
+    background: linear-gradient(135deg, #fff, var(--accent) 65%, var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    font-variant-numeric: tabular-nums;
+    transition: transform .08s ease-out;
+  }
+  .score.pop { transform: scale(1.08); }
+  button {
+    width: 100%;
+    font: inherit;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border: 0;
+    border-radius: 14px;
+    padding: 16px 24px;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(91,140,255,.35);
+    transition: transform .08s ease, box-shadow .15s ease, filter .15s ease;
+  }
+  button:hover { filter: brightness(1.1); box-shadow: 0 10px 30px rgba(91,140,255,.5); }
+  button:active { transform: scale(.97); }
+  button:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+  .hint { margin: 18px 0 0; font-size: .85rem; color: #7f8ab3; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Click Counter</h1>
+  <div class="score" id="score" aria-live="polite">0</div>
+  <button id="add" type="button">Add point</button>
+  <p class="hint">Every click counts.</p>
+</main>
+<script>
+  const scoreEl = document.getElementById('score')
+  const addBtn = document.getElementById('add')
+  let score = 0
+
+  addBtn.addEventListener('click', () => {
+    score += 1
+    scoreEl.textContent = String(score)
+    scoreEl.classList.remove('pop')
+    void scoreEl.offsetWidth
+    scoreEl.classList.add('pop')
+  })
+</script>
+</body>
+</html>
