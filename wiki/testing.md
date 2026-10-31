@@ -402,3 +402,10 @@ Run `node --test scripts/session-checkpoint.test.mjs`. Verify a conversation abo
 Read the runner's `opencode-run.log` before blaming browser transport or checkpoint storage. After shutdown, read the `opencode-run.log` asset from the run's `opencode-logs-<run>` release. Inspect `type: error` events and `provider.free-limit` status 429. Use [codex-app-dev/PlayGround#10](https://github.com/codex-app-dev/PlayGround/issues/10) as the quota example; issues 6–10 stopped before generating code on the free endpoint.
 
 Print a bounded, categorized reason in the failed Actions step and include that reason in the terminal OmGithub run callback before the debug hold. Keep raw provider response bodies out of status messages. Connect an account provider or select a model with available quota; avoid repeated retries against an exhausted free endpoint. Inspect the worker's own quota response rather than assuming the limit belongs to the GitHub account.
+
+
+## Verify sequential free-model fallback
+
+Try the preferred live free models in order: `deepseek-v4.1-flash-free`, `glm-5.3-flash-free`, `mimo-v2.6-flash-free`, then `big-pickle`. Keep an explicitly selected preferred model first. Skip known unavailable catalog entries; retain the preferred list when discovery fails. Keep explicit non-free selections unchanged.
+
+Advance on structured quota, rate-limit, model-unavailable, or transient provider-server failures. Preserve the current session and exact request. Stop on success, cancellation, credential rejection, or unrelated execution errors. Write the terminal exit marker only after the sequence finishes. Keep the connected OpenRouter fallback after the free chain when configured. Inspect `main-model`, `model-attempts.json`, and `opencode-run.log` on the worker. Run `node --test scripts/run-with-model-fallback.test.mjs` to verify ordered fallback, early success, exhaustion, restored sessions, zero-exit error events, and exact prompt preservation.

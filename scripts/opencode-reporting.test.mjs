@@ -53,11 +53,9 @@ test('passes exact resumed text to OpenCode without command wrappers', async () 
     const input = join(dir, 'prompt'), capture = join(dir, 'args'), binary = join(dir, 'oc');
     writeFileSync(input, prompt);
     writeFileSync(binary, '#!/usr/bin/env node\nrequire("node:fs").writeFileSync(process.env.CAPTURE, JSON.stringify(process.argv.slice(2)))\n', { mode: 0o755 });
-    const block = workflow.split('name: Run OpenCode and locate its web session')[1].split('      - name:')[0];
-    const script = block.match(/nohup bash -c '([\s\S]*?)' \\/)[1];
-    execFileSync('bash', ['-c', script, '_', binary, '3000', input, join(dir, 'log'), join(dir, 'exit'), 'model', 'true', 'true', 'true'], {
-      env: { ...process.env, RESUME_SESSION_ID: 'ses_main', PROJECT_DIR: dir, CAPTURE: capture }
-    });
+    const { runModels } = await import('./run-with-model-fallback.mjs');
+    await runModels({ binary, port: '3000', promptFile: input, logFile: join(dir, 'log'), exitFile: join(dir, 'exit'), selected: 'test/model', models: ['test/model'],
+      env: { ...process.env, RESUME_SESSION_ID: 'ses_main', PROJECT_DIR: dir, CAPTURE: capture } });
     const args = JSON.parse(readFileSync(capture, 'utf8'));
     assert.equal(args.at(-1), prompt);
     assert.equal(args.includes('--command'), false);

@@ -761,7 +761,7 @@ jobs:
             }
             // Free OpenCode models get retired (the API then answers "ModelDeprecated" and
             // OpenCode reports "Unexpected server error"). Pick a live default from the catalog.
-            const preferred = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle'];
+            const { preferredFreeModels: preferred, modelCandidates } = await import(`${process.env.RUNTIME_DIR}/scripts/run-with-model-fallback.mjs`);
             let live = null;
             try {
               const catalog = await (await fetch('https://models.opencode.ai/api.json', { signal: AbortSignal.timeout(15000) })).json();
@@ -779,9 +779,10 @@ jobs:
             const skills = names.filter((name) => name.startsWith('skill/'))
               .map((name) => name.slice('skill/'.length)).sort();
             core.setOutput('model', model);
+            core.setOutput('models_json', JSON.stringify(modelCandidates(model, live)));
             core.setOutput('variant', ['openai/gpt-6.1-sol', 'openai/gpt-6-astra'].includes(model) ? 'high' : '');
             core.setOutput('skills_json', JSON.stringify(skills));
-            core.info(`Resolved model=${model}; skills=${skills.join(', ') || '(none)'}`);
+            core.info(`Resolved model=${model}; sequence=${modelCandidates(model, live).join(' → ')}; skills=${skills.join(', ') || '(none)'}`);
 
       - name: Restore saved OpenCode conversation
         if: env.RESUME_CHECKPOINT_FILE != '' && env.TEST_REQUEST != 'true' && env.SSH_ONLY_REQUEST != 'true'
@@ -851,6 +852,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OPENCODE_WEB_URL: ${{ steps.opencode_web.outputs.url }}
           OPENCODE_MODEL: ${{ steps.opencode_labels.outputs.model }}
+          OPENCODE_MODELS_JSON: ${{ steps.opencode_labels.outputs.models_json }}
           OPENCODE_VARIANT: ${{ steps.opencode_labels.outputs.variant }}
           OPENCODE_SKILLS: ${{ steps.opencode_labels.outputs.skills_json }}
           GOAL_REQUEST: ${{ env.GOAL_REQUEST }}
@@ -879,31 +881,8 @@ jobs:
             prompt="${prompt//@SKILL_TEXT@/$skill_text}"
             printf '%s\n' "$prompt" > "$PROMPT_FILE"
           fi
-          # The inner shell expands the positional parameters after nohup starts.
-          # shellcheck disable=SC2016
-          nohup bash -c '
-            resume_args=()
-            [[ -n "${RESUME_SESSION_ID:-}" ]] && resume_args=(--session "$RESUME_SESSION_ID")
-            cd "$PROJECT_DIR" || exit 1
-            exact_prompt="$(cat "$3"; printf .)"
-            exact_prompt="${exact_prompt%.}"
-            "$1" run "${resume_args[@]}" --auto --server "http://127.0.0.1:$2" --model "$6" --format json "$exact_prompt" > "$4" 2>&1
-            code=$?
-            if [[ "$code" != 0 && -n "${OPENROUTER_API_KEY:-}" ]] && grep -Eiq "FreeUsageLimit|rate.limit|HTTP.?429" "$4"; then
-              fallback_session="$(node "$RUNTIME_DIR/scripts/v2-log-session.mjs" "$4")"
-              [[ -n "$fallback_session" ]] && resume_args=(--session "$fallback_session")
-              printf "%s\n" "openrouter/cohere/north-mini-code:free" > "$OPENCODE_WEB_DIR/main-model"
-              echo "Retrying the rate-limited request with the connected OpenRouter provider" >> "$4"
-              "$1" run "${resume_args[@]}" --auto --server "http://127.0.0.1:$2" --model "openrouter/cohere/north-mini-code:free" --format json "$exact_prompt" >> "$4" 2>&1
-            else
-              (exit "$code")
-            fi
-
-            code=$?
-            echo "$code" > "$5"
-            exit "$code"
-          ' \
-            _ "$OPENCODE_BIN" "$OPENCODE_WEB_PORT" "$PROMPT_FILE" "$RUN_LOG" "$RUN_EXIT" "$OPENCODE_MODEL" \
+          nohup node "$RUNTIME_DIR/scripts/run-with-model-fallback.mjs" \
+            "$OPENCODE_BIN" "$OPENCODE_WEB_PORT" "$PROMPT_FILE" "$RUN_LOG" "$RUN_EXIT" "$OPENCODE_MODEL" \
             > /dev/null 2>&1 &
           echo $! > "$OPENCODE_WEB_DIR/opencode-run.pid"
           fi
