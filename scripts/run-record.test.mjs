@@ -10,6 +10,7 @@ test('registers connectivity without duplicating publication state', async t => 
   const dir = mkdtempSync(join(tmpdir(), 'run-register-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   for (const [name, value] of Object.entries({ 'web-url': 'https://control.test', 'files-url': 'https://files.test/', 'ready-preview-url': 'https://app.test', 'checkpoint-session-id': 'ses_main', 'checkpoint-state.json': '{"commit":"abc"}', 'deployment-result.json': '{"sync":"failed"}' })) writeFileSync(join(dir, name), value)
+  writeFileSync(join(dir, 'resume-status.json'), JSON.stringify({ status: 'fresh' }))
   let payload
   const server = createServer(async (req, res) => {
     assert.equal(req.url, '/api/github/alice/game/issues/2/run')
@@ -19,6 +20,7 @@ test('registers connectivity without duplicating publication state', async t => 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => server.close())
   await registerRun({ OPENCODE_WEB_DIR: dir, PROJECT_DIR: dir, GITHUB_RUN_ID: '7', GITHUB_RUN_ATTEMPT: '2', GITHUB_REPOSITORY: 'alice/game', TRIGGER_ISSUE_NUMBER: '2', GH_TOKEN: 'fixture', OMGITHUB_ORIGIN: `http://127.0.0.1:${server.address().port}` }, undefined, async () => true)
+  assert.equal(payload.resume_status, 'fresh')
   assert.equal(payload.state, 'live')
   assert.equal(payload.urls.files, 'https://files.test/')
   assert.equal(payload.urls.opencode, 'https://control.test/omgithub/connect')

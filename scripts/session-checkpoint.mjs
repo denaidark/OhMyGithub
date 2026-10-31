@@ -1,7 +1,8 @@
 import { normalizeV2Version, validateV2Session } from './opencode-v2-api.mjs'
+import { isDeepStrictEqual } from 'node:util'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, lstatSync } from 'node:fs'
+import { appendFileSync, mkdirSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, lstatSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,7 +20,7 @@ export function command(file, args, options = {}) {
 }
 // OpenCode can exit before a piped stdout buffer drains. A regular file descriptor
 // makes large JSON exports synchronous at the CLI boundary instead of truncating them.
-export function exportSession(binary, sessionId, cwd, temporaryDirectory, version = '2.2.2', standalone = false) {
+export function exportSession(binary, sessionId, cwd, temporaryDirectory, version, standalone = false) {
   const file = join(temporaryDirectory, `session-export-${randomUUID()}.json`)
   const fd = openSync(file, 'wx', 0o600)
   try {
@@ -53,7 +54,7 @@ export function validateCheckpoint(c, source) {
   if (!(c?.version === 2 && c.repository?.toLowerCase() === source.source_repository.toLowerCase() && c.issue_number === source.source_issue &&
       Number.isSafeInteger(c.run_id) && c.run_id > 0 && /^[a-f0-9]{40}$/.test(c.commit) && /^opencode-checkpoints\/[1-9]\d*$/.test(c.branch) &&
       typeof c.project_dir === 'string' && !c.project_dir.startsWith('/') && !c.project_dir.includes('\\') && !/[\r\n\0]/.test(c.project_dir) && !c.project_dir.split('/').includes('..') &&
-      /^2\.\d+\.\d+$/.test(c.opencode_version) && c.public_history === true && (c.code_only === true || /^ses_[a-zA-Z0-9]+$/.test(c.session?.info?.id || '') && validTranscript(c.session, c.opencode_version)))) throw new Error('No complete saved session is available.')
+      (c.code_only === true || /^2\.\d+\.\d+$/.test(c.opencode_version)) && c.public_history === true && (c.code_only === true || /^ses_[a-zA-Z0-9]+$/.test(c.session?.info?.id || '') && validTranscript(c.session, c.opencode_version)))) throw new Error('No complete saved session is available.')
   if (c.session?.info?.parentID || c.session?.info?.fork) throw new Error('This checkpoint contains a verification fork. Select an earlier main-session checkpoint or start a new build.')
   return c
 }
@@ -104,16 +105,23 @@ export function prepare() {
   const raw = `https://raw.githubusercontent.com/${source.source_repository}/${source.source_commit}`
   try {
     const status = command('curl', ['--silent', '--show-error', '--location', '--max-time', '120', '--output', download, '--write-out', '%{http_code}', `${raw}/.omgithub/checkpoint.json`])
-    if (status === '404') payload = { version: 2, repository: source.source_repository, issue_number: source.source_issue, run_id: 1, branch: `opencode-checkpoints/${source.source_issue}`, project_dir: '', opencode_version: '2.2.2', public_history: true, conversation_status: 'missing' }
+    if (status === '404') payload = { version: 2, repository: source.source_repository, issue_number: source.source_issue, run_id: 1, branch: `opencode-checkpoints/${source.source_issue}`, project_dir: '', opencode_version: null, public_history: true, conversation_status: 'missing' }
     else if (status === '200') payload = JSON.parse(readFileSync(download, 'utf8'))
     else throw new Error(`GitHub checkpoint read failed (${status}).`)
     payload.commit = source.source_commit
     payload.code_only = payload.conversation_status !== 'saved'
     if (!payload.code_only) {
-      command('curl', ['--fail', '--silent', '--show-error', '--max-filesize', '100000000', '--max-time', '120', '--output', download, `${raw}/.omgithub/conversation.json`])
-      const bytes = readFileSync(download)
-      if (digest(bytes) !== payload.session_sha256) throw new Error('Checkpoint conversation digest does not match.')
-      payload.session = JSON.parse(bytes)
+      try {
+        command('curl', ['--fail', '--silent', '--show-error', '--max-filesize', '100000000', '--max-time', '120', '--output', download, `${raw}/.omgithub/conversation.json`])
+        const bytes = readFileSync(download)
+        if (digest(bytes) !== payload.session_sha256) throw new Error('Conversation digest mismatch')
+        payload.session = JSON.parse(bytes)
+        if (!validTranscript(payload.session, payload.opencode_version) || payload.session.info?.parentID || payload.session.info?.fork) throw new Error('Invalid conversation')
+      } catch {
+        payload.code_only = true
+        delete payload.session
+        process.stderr.write('Conversation unavailable. Keep saved code and start a fresh chat.\n')
+      }
     }
   } finally { rmSync(download, { force: true }) }
   const checkpoint = validateCheckpoint(payload, source)
@@ -128,28 +136,41 @@ export function prepare() {
   if (!importedSnapshot) setEnv('TARGET_SHA', checkpoint.commit)
   setEnv('PROJECT_PATH', checkpoint.project_dir || '.')
   setEnv('COMMENT_BODY', source.prompt)
-  if (!checkpoint.code_only) setEnv('RESUME_OPENCODE_VERSION', checkpoint.opencode_version)
   setEnv('RESUME_CHECKPOINT_FILE', checkpointPath())
 }
 export function restore() {
   if (!env.RESUME_CHECKPOINT_FILE) return
   const checkpoint = JSON.parse(readFileSync(env.RESUME_CHECKPOINT_FILE, 'utf8'))
-  if (checkpoint.code_only) { process.stderr.write('Code restored. Starting a new conversation.\n'); return }
-  if (checkpoint.session?.info?.parentID || checkpoint.session?.info?.fork) throw new Error('Cannot resume a verification fork. Select a main-session checkpoint.')
+  const status = value => {
+    mkdirSync(env.OPENCODE_WEB_DIR, { recursive: true })
+    writeFileSync(join(env.OPENCODE_WEB_DIR, 'resume-status.json'), JSON.stringify({ status: value }))
+  }
+  const fresh = () => {
+    delete env.RESUME_SESSION_ID
+    setEnv('RESUME_SESSION_ID', '')
+    status('fresh')
+    process.stderr.write('Code restored. Started a fresh chat.\n')
+    return { status: 'fresh' }
+  }
+  if (checkpoint.code_only) return fresh()
   const binary = env.OPENCODE_BIN || join(env.HOME, '.opencode/bin/opencode')
+  // Verify the running binary independently; an invalid runtime is not an import failure.
   const version = normalizedVersion(command(binary, ['--version']))
-  if (version !== checkpoint.opencode_version) throw new Error('Install the saved OpenCode version before importing.')
-  const session = portableSession(checkpoint.session)
-  session.info.location = { ...session.info.location, directory: resolve(env.PROJECT_DIR) }
-  delete session.info.parentID
   const file = join(env.RUNNER_TEMP, 'omgithub-session-import.json')
-  writeFileSync(file, JSON.stringify(session), { mode: 0o600 })
   try {
+    if (!validTranscript(checkpoint.session, checkpoint.opencode_version) || checkpoint.session?.info?.parentID || checkpoint.session?.info?.fork) return fresh()
+    const session = portableSession(checkpoint.session)
+    session.info.location = { ...session.info.location, directory: resolve(env.PROJECT_DIR) }
+    delete session.info.parentID
+    writeFileSync(file, JSON.stringify(session), { mode: 0o600 })
     command(binary, ['session', 'import', file, '--standalone', '--directory', resolve(env.PROJECT_DIR)], { cwd: env.PROJECT_DIR })
     const restored = exportSession(binary, session.info.id, env.PROJECT_DIR, env.RUNNER_TEMP, version, true)
-    if (restored.info?.id !== session.info.id || JSON.stringify(restored.messages) !== JSON.stringify(session.messages)) throw new Error('The saved conversation could not be restored completely.')
+    if (restored.info?.id !== session.info.id || !isDeepStrictEqual(restored.messages, session.messages)) return fresh()
     setEnv('RESUME_SESSION_ID', session.info.id)
-  } finally { rmSync(file, { force: true }) }
+    status('restored')
+    return { status: 'restored' }
+  } catch { return fresh() }
+  finally { rmSync(file, { force: true }) }
 }
 export function saveCheckpoint({ interrupted = false } = {}) {
   const root = resolve(env.GITHUB_WORKSPACE), project = resolve(env.PROJECT_DIR)

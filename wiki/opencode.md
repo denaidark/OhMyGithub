@@ -8,7 +8,7 @@ Create an issue with the OpenCode label attached. Freeze its request, branch, an
 
 ## Start workers
 
-Install the pinned v2 runtime. Restore compatible conversation history before opening the browser session. Start a new conversation when only source code is available. Run startup.sh once for project prerequisites. Run start.sh in the foreground through the controller. Declare the built static directory inside PROJECT_DIR in deployment-output.json.
+Resolve and install the latest stable v2 runtime for every run. Attempt conversation import on that runtime. Keep the saved code and start a fresh chat when conversation restoration fails. Record the actual installed version in checkpoints. Run startup.sh once for project prerequisites. Run start.sh in the foreground through the controller. Declare the built static directory inside PROJECT_DIR in deployment-output.json.
 
 ## Expose live services
 
@@ -42,4 +42,4 @@ Stop the lifecycle and connector. Remove execution tunnel and DNS resources. Rec
 
 Run `account-credentials.mjs install-console` after the V2 server becomes healthy and before starting model work. Import the account's Console OAuth credential through `/api/credential` with method `device` and workspace metadata. Remove only the matching legacy duplicate. Start the account synchronization watcher after native import so it inherits the server port and password. Read refreshed Console tokens from `/api/credential`; retain other providers' existing synchronization behavior. Stop uploads after a revision conflict and preserve the active native connection until final cleanup.
 
-Run `node --test scripts/console-credentials.test.mjs`. Run the account credential tests relevant to load, cleanup, concurrency, MCP, and provider merging. Run `node scripts/test-console-runtime.mjs` against an isolated OpenCode 2.2.2 server with an explicitly authorized Console test token file. Keep the token file private and remove it after verification.
+Run `node --test scripts/console-credentials.test.mjs`. Run the account credential tests relevant to load, cleanup, concurrency, MCP, and provider merging. Run `node scripts/test-console-runtime.mjs` against an isolated latest-stable OpenCode v2 server with an explicitly authorized Console test token file. Keep the token file private and remove it after verification.

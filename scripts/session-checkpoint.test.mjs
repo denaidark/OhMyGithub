@@ -58,3 +58,36 @@ test('exclude runtime files and redact provider credentials', () => {
   for (const path of ['.env', 'node_modules/x', '.omgithub/conversation.json', '.opencode-web/log']) assert.equal(excludedPath(path), true)
   assert.equal(redactSession({ password: 'sensitive', text: 'test secret-value' }, ['secret-value']).text, 'test [credential removed]')
 })
+
+test('restore older saved history on a newer runtime; import failures keep code and start fresh', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'latest-resume-')), original = { ...process.env }
+  try {
+    const state = join(dir, 'state'), binary = join(dir, 'oc'), environment = join(dir, 'env')
+    mkdirSync(state)
+    const session = { info: { id: 'ses_older', location: { directory: dir } }, messages: [{ type: 'user', id: 'msg_one', content: [{ type: 'text', text: 'Keep this game' }] }] }
+    const checkpoint = join(dir, 'checkpoint.json')
+    writeFileSync(checkpoint, JSON.stringify({ opencode_version: '2.2.2', session }))
+    writeFileSync(join(dir, 'index.html'), '<h1>Keep saved code</h1>')
+    writeFileSync(binary, `#!/usr/bin/env node
+const fs=require('node:fs'),p=require('node:path'),args=process.argv.slice(2),state=p.join(process.env.OPENCODE_WEB_DIR,'imported.json');
+if(args[0]==='--version')process.stdout.write('opencode v2.2.5');
+else if(args[1]==='import'){ if(process.env.FAIL_IMPORT==='1')process.exit(1);fs.copyFileSync(args[2],state) }
+else if(args[1]==='export')process.stdout.write(process.env.FAIL_EXPORT==='1'?'{}':fs.readFileSync(state));
+else process.exit(1);
+`, { mode: 0o755 })
+    Object.assign(process.env, { RESUME_CHECKPOINT_FILE: checkpoint, OPENCODE_BIN: binary, RUNNER_TEMP: dir, PROJECT_DIR: dir, OPENCODE_WEB_DIR: state, GITHUB_ENV: environment, FAIL_IMPORT: '', FAIL_EXPORT: '' })
+    assert.equal(restore().status, 'restored')
+    assert.equal(JSON.parse(readFileSync(join(state, 'resume-status.json'))).status, 'restored')
+    for (const failure of ['FAIL_IMPORT', 'FAIL_EXPORT']) {
+      process.env[failure] = '1'; process.env.RESUME_SESSION_ID = 'ses_stale'
+      assert.equal(restore().status, 'fresh')
+      assert.equal(process.env.RESUME_SESSION_ID, undefined)
+      assert.equal(JSON.parse(readFileSync(join(state, 'resume-status.json'))).status, 'fresh')
+      assert.equal(readFileSync(join(dir, 'index.html'), 'utf8'), '<h1>Keep saved code</h1>')
+      process.env[failure] = ''
+    }
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key]
+    Object.assign(process.env, original); rmSync(dir, { recursive: true, force: true })
+  }
+})

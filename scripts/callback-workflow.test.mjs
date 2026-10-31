@@ -3,11 +3,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
-test('use callback credentials only for OmGithub callbacks; install the pinned v2 runtime without GitHub REST', () => {
+test('use callback credentials only for OmGithub callbacks; install the latest stable v2 runtime without GitHub REST', () => {
   const workflow = read('.github/workflows/opencode-reusable.yml')
   assert.doesNotMatch(workflow, /api\.github\.com\/repos\/anomalyco\/opencode\/releases/)
   assert.match(workflow, /https:\/\/opencode\.ai\/v2\/install/)
-  assert.match(workflow, /OPENCODE_VERSION="\$\{RESUME_OPENCODE_VERSION:-2\.2\.2\}"/)
+  assert.match(workflow, /latest-opencode-version\.mjs/)
   assert.match(workflow, /name: Register Actions progress\n        continue-on-error: true/)
   for (const name of ['run-record.mjs', 'session-deploy.mjs', 'session-lifecycle.mjs']) {
     const code = read(`scripts/${name}`)

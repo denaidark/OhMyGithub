@@ -14,6 +14,8 @@ export async function registerRun(env, state, check) {
     urls: { opencode: session && web ? `${web}/omgithub/connect` : '',
       files: read('files-url'), preview,
       branch: `https://github.com/${env.GITHUB_REPOSITORY}/tree/opencode-checkpoints/${env.TRIGGER_ISSUE_NUMBER}` } }
+  const resume = read('resume-status.json')
+  if (resume) { const status = JSON.parse(resume).status; if (['fresh', 'restored'].includes(status)) body.resume_status = status }
   body.urls = await readyPublicUrls(body.urls, check)
   if (body.state === 'live' && !body.urls.opencode) body.state = 'starting'
   const response = await fetch(`${env.OMGITHUB_ORIGIN || 'https://omgithub.com'}/api/github/${env.GITHUB_REPOSITORY}/issues/${env.TRIGGER_ISSUE_NUMBER}/run`, {
