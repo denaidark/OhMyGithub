@@ -191,7 +191,7 @@ async function serve() {
       await child(process.execPath, [join(env.RUNTIME_DIR, 'scripts/session-deploy.mjs')], { signal, env: { ...env, APP_URL: appURL, CHECKPOINT_COMMIT: checkpoint.commit, CHECKPOINT_GENERATION: checkpoint.generation, MAIN_MESSAGE_ID: messageID, DEPLOYMENT_GENERATION: String(generation) } })
     },
     status: async (state, generation, error = '') => {
-      writeFileSync(join(directory, 'deployment-status.json'), JSON.stringify({ state, generation, error, updated_at: new Date().toISOString() }))
+      writeFileSync(join(directory, 'deployment-status.json'), JSON.stringify({ state, generation, error, message_id: lifecycle.lastMessage, updated_at: new Date().toISOString() }))
       if (state === 'working' && existsSync(join(directory, 'active-validation.json'))) {
         const active = JSON.parse(readFileSync(join(directory, 'active-validation.json'), 'utf8'))
         await v2api.interrupt(active.id)

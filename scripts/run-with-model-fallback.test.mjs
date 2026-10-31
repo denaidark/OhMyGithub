@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runModels, modelCandidates, preferredFreeModels, retryableProviderError } from './run-with-model-fallback.mjs'
+import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome } from './run-with-model-fallback.mjs'
 
 test('order preferred free candidates and preserve explicitly chosen non-free models', () => {
   assert.deepEqual(modelCandidates(preferredFreeModels[0]), preferredFreeModels)
@@ -64,5 +64,43 @@ test('stop immediately on success or unrelated failure; use connected fallback o
     const result = await runModels({ ...f.options, env: { ...f.options.env, OPENROUTER_API_KEY: 'configured' } })
     assert.equal(result.code, 0)
     assert.equal(result.attempts.at(-1).model, 'openrouter/cohere/north-mini-code:free')
+  } finally { f.close() }
+})
+
+
+const successfulSnapshot = created => ({ busy: false, messages: [
+  { type: 'idle', outcome: 'succeeded', time: { created } },
+  { type: 'assistant', id: 'msg_recovered', finish: 'stop' }
+] })
+test('honor a fresh successful terminal outcome after recovered provider errors, including a sticky CLI exit', async () => {
+  for (const pattern of [['zero-error'], ['quota']]) {
+    const f = await fixture(pattern)
+    try {
+      const result = await runModels({ ...f.options, api: { snapshot: async () => successfulSnapshot(Date.now()) } })
+      assert.equal(result.code, 0)
+      assert.equal(result.attempts.length, 1)
+      assert.equal(result.attempts[0].outcome, 'succeeded')
+      assert.equal(result.attempts[0].retryable, false)
+      const completion = JSON.parse(readFileSync(join(f.directory, 'main-completion.json')))
+      assert.equal(completion.message_id, 'msg_recovered')
+      assert.equal(completion.session_id, 'ses_main')
+      assert.equal(readFileSync(f.options.exitFile, 'utf8').trim(), '0')
+    } finally { f.close() }
+  }
+})
+test('never trust old success, an active turn, missing assistant proof, or a transport gap', async () => {
+  const started = Date.now(), pause = async () => {}
+  for (const snapshot of [successfulSnapshot(started - 1), { ...successfulSnapshot(started), busy: true }, { busy: false, messages: [{ type: 'idle', outcome: 'succeeded', time: { created: started } }] }]) {
+    assert.equal(await terminalAttemptOutcome({ api: { snapshot: async () => snapshot }, sessionID: 'ses_main', started, pause }), null)
+  }
+  assert.equal(await terminalAttemptOutcome({ api: { snapshot: async () => { throw new Error('offline') } }, sessionID: 'ses_main', started, pause }), null)
+})
+test('a fresh interrupted terminal outcome stops the model sequence', async () => {
+  const f = await fixture(['zero-error'])
+  try {
+    const result = await runModels({ ...f.options, api: { snapshot: async () => ({ busy: false, messages: [{ type: 'idle', outcome: 'interrupted', time: { created: Date.now() } }] }) } })
+    assert.equal(result.code, 1)
+    assert.equal(result.attempts.length, 1)
+    assert.equal(result.attempts[0].outcome, 'interrupted')
   } finally { f.close() }
 })

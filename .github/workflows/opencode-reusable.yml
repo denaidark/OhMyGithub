@@ -971,8 +971,8 @@ jobs:
             exit 1
           fi
 
-      - name: Verify synthetic production delivery
-        if: env.TEST_REQUEST == 'true' && env.SSH_ONLY_REQUEST != 'true'
+      - name: Wait for production delivery
+        if: env.SSH_ONLY_REQUEST != 'true'
         shell: bash
         run: |
           set -euo pipefail

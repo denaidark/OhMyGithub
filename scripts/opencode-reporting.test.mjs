@@ -114,3 +114,15 @@ test('successful real and test builds are labeled complete', () => {
   assert.match(block, /name: 'in progress'/);
   assert.match(block, /labels: \['complete'\]/);
 });
+
+
+test('wait for final production delivery for real runs before reporting completion and cleanup', () => {
+  const gate = workflow.indexOf('      - name: Wait for production delivery')
+  const completed = workflow.indexOf('      - name: Mark issue complete')
+  const cleanup = workflow.indexOf('      - name: Stop lifecycle controller')
+  assert.ok(gate > 0 && gate < completed && completed < cleanup)
+  const step = workflow.slice(gate, workflow.indexOf('      - name:', gate + 20))
+  assert.match(step, /if: env.SSH_ONLY_REQUEST != 'true'/)
+  assert.doesNotMatch(step, /TEST_REQUEST == 'true'/)
+  assert.match(step, /wait-deployment\.mjs/)
+})

@@ -409,3 +409,10 @@ Print a bounded, categorized reason in the failed Actions step and include that 
 Try the preferred live free models in order: `deepseek-v4.1-flash-free`, `glm-5.3-flash-free`, `mimo-v2.6-flash-free`, then `big-pickle`. Keep an explicitly selected preferred model first. Skip known unavailable catalog entries; retain the preferred list when discovery fails. Keep explicit non-free selections unchanged.
 
 Advance on structured quota, rate-limit, model-unavailable, or transient provider-server failures. Preserve the current session and exact request. Stop on success, cancellation, credential rejection, or unrelated execution errors. Write the terminal exit marker only after the sequence finishes. Keep the connected OpenRouter fallback after the free chain when configured. Inspect `main-model`, `model-attempts.json`, and `opencode-run.log` on the worker. Run `node --test scripts/run-with-model-fallback.test.mjs` to verify ordered fallback, early success, exhaustion, restored sessions, zero-exit error events, and exact prompt preservation.
+
+
+## Verify recovered provider errors and final delivery
+
+Use [lasseondev/PlayGround#27](https://github.com/lasseondev/PlayGround/issues/27) as the recovered-error regression. Distinguish intermediate provider errors from the final session outcome. Query the current V2 snapshot after each model attempt. Accept success only from a fresh succeeded idle marker with its completed assistant message; reject older success, busy sessions, and interrupted turns. Record native CLI exit codes separately from effective terminal outcomes.
+
+Write `main-completion.json` with the verified final message ID. Match that ID in lifecycle deployment status. Wait for that message's ready generation and its complete deployment result before labeling the issue complete or allowing cleanup. Ignore earlier ready generations and retry brief reconciliation failures. Fail on the current generation's delivery error or the bounded delivery timeout. Run the fallback, lifecycle, and wait-deployment focused tests before publishing workflow changes.
