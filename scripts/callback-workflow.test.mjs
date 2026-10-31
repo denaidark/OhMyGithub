@@ -32,6 +32,8 @@ test('report failed execution before the debug hold keeps Actions running', () =
   const step = workflow.slice(early, hold)
   assert.match(step, /if: failure\(\)/)
   assert.match(step, /run-failure\.mjs" --payload/)
+  assert.match(step, /if \[\[ -f "\$RUNTIME_DIR\/scripts\/run-failure\.mjs" \]\]/)
+  assert.match(step, /failed before model diagnostics were available/)
   assert.match(step, /issues\/\$TRIGGER_ISSUE_NUMBER\/run/)
 })
 

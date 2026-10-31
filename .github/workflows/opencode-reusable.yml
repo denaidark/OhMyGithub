@@ -1101,7 +1101,10 @@ jobs:
         run: |
           set -euo pipefail
           sequence=$(/usr/bin/time -p node -p 'Date.now()')
-          payload=$(/usr/bin/time -p node "$RUNTIME_DIR/scripts/run-failure.mjs" --payload "$sequence")
+          payload="{\"run\":\"$GITHUB_RUN_ID\",\"attempt\":$GITHUB_RUN_ATTEMPT,\"sequence\":$sequence,\"state\":\"ended\",\"phase\":\"building\",\"outcome\":\"failure\",\"reason\":\"The build workflow failed before model diagnostics were available. Open the workflow logs for details.\"}"
+          if [[ -f "$RUNTIME_DIR/scripts/run-failure.mjs" ]]; then
+            payload=$(/usr/bin/time -p node "$RUNTIME_DIR/scripts/run-failure.mjs" --payload "$sequence")
+          fi
           /usr/bin/time -p curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
             -H "Authorization: Bearer $OMGITHUB_CALLBACK_TOKEN" -H 'Content-Type: application/json' \
             --data "$payload" \
