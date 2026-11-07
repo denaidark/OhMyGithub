@@ -1,4 +1,5 @@
 import { createConsoleCredentialBridge } from './console-credentials.mjs'
+import { createProviderCredentialBridge } from './provider-credentials.mjs'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -32,13 +33,18 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
     save(secretFile, values)
   }
   const consoleBridge = createConsoleCredentialBridge({ env, request, remember })
+  const providerBridge = createProviderCredentialBridge({ env, request, remember })
   async function installConsole() {
     if (!existsSync(stateFile)) return
     const state = JSON.parse(readFileSync(stateFile, 'utf8'))
-    if (!(state.imported || []).includes('opencode')) return
-    if (state.consoleCredential) return
-    const id = await consoleBridge.install(state.auth)
-    if (id) { state.consoleCredential = id; save(stateFile, state) }
+    if (!(state.imported || []).length) return
+    if (!state.consoleCredential && (state.imported || []).includes('opencode')) {
+      const id = await consoleBridge.install(state.auth)
+      if (id) state.consoleCredential = id
+    }
+    const installed = await providerBridge.install(state.auth, { skip: new Set(['opencode']) })
+    state.providerCredentials = { ...(state.providerCredentials || {}), ...installed }
+    save(stateFile, state)
   }
   async function call(body) {
     const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL); url.searchParams.set('audience', origin)
@@ -124,12 +130,17 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
     if (state.syncStopped) {
       if (release) {
         await consoleBridge.remove(state.consoleCredential)
+        for (const id of Object.values(state.providerCredentials || {})) await providerBridge.remove(id).catch(() => {})
         rmSync(stateFile, { force: true }); rmSync(authFile, { force: true })
       }
       return
     }
     const auth = JSON.parse(readFileSync(authFile, 'utf8'))
     if (state.consoleCredential) auth.opencode = await consoleBridge.read(state.consoleCredential)
+    for (const [integrationID, id] of Object.entries(state.providerCredentials || {})) {
+      try { auth[integrationID] = await providerBridge.read(integrationID, id) }
+      catch { /* The server may have rotated or removed it; keep the last account copy. */ }
+    }
     // Only return the providers actually checked out from this account.
     const imported = new Set(state.imported || Object.keys(state.auth))
     const selected = Object.fromEntries(Object.keys(state.auth).map(key => [key, imported.has(key) ? auth[key] : state.auth[key]]))
@@ -137,7 +148,7 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
     const changed = JSON.stringify(selected) !== JSON.stringify(state.auth)
     try {
       const data = await call({ operation: 'refresh', revision: state.revision, ...(changed ? { auth: selected } : {}), release })
-      save(stateFile, { revision: data.revision, auth: selected, imported: [...imported], ...(state.consoleCredential ? { consoleCredential: state.consoleCredential } : {}) })
+      save(stateFile, { revision: data.revision, auth: selected, imported: [...imported], ...(state.consoleCredential ? { consoleCredential: state.consoleCredential } : {}), ...(Object.keys(state.providerCredentials || {}).length ? { providerCredentials: state.providerCredentials } : {}) })
     } catch (error) {
       if (error.status === 409) {
         if (state.consoleCredential && !release) save(stateFile, { ...state, syncStopped: true })
@@ -147,6 +158,7 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
     } finally {
       if (release) {
         if (state.consoleCredential) await consoleBridge.remove(state.consoleCredential)
+        for (const id of Object.values(state.providerCredentials || {})) await providerBridge.remove(id).catch(() => {})
         rmSync(stateFile, { force: true }); rmSync(authFile, { force: true })
       }
     }
