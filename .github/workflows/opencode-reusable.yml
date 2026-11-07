@@ -1247,7 +1247,7 @@ jobs:
 
 
       - name: Release account credentials before debug hold
-        if: always()
+        if: always() && env.AGENTSWEB_SSH_ENABLED != 'true'
         continue-on-error: true
         shell: bash
         run: |

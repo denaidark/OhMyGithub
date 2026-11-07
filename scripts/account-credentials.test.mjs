@@ -61,7 +61,7 @@ test('cleanup removes account auth even when a revision conflict already stopped
   assert.equal(existsSync(f.file), false)
 })
 
-test('release only after main execution and validation settle, and before debug hold', async t => {
+test('release only after main execution and validation settle; keep auth during SSH holds', async t => {
   const { credentialWorkSettled } = await import('./account-credentials.mjs')
   const { dir, env } = fixture(t); env.OPENCODE_WEB_DIR = dir
   assert.equal(credentialWorkSettled(env), true)
@@ -75,7 +75,9 @@ test('release only after main execution and validation settle, and before debug 
   writeFileSync(join(dir, 'active-validation.json'), '{}')
   assert.equal(credentialWorkSettled(env), false)
   const workflow = readFileSync(new URL('../.github/workflows/opencode-reusable.yml', import.meta.url), 'utf8')
-  assert.ok(workflow.indexOf('- name: Release account credentials before debug hold') < workflow.indexOf('- name: Keep temporary access available'))
+  const release = workflow.split('      - name: Release account credentials before debug hold\n')[1].split('      - name:')[0]
+  assert.match(release, /if: always\(\) && env\.AGENTSWEB_SSH_ENABLED != 'true'/)
+  assert.ok(workflow.indexOf('- name: Keep temporary access available') < workflow.indexOf('- name: Sync and release account credentials'))
 })
 
 
