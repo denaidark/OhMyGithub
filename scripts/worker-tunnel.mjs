@@ -11,6 +11,8 @@ export function frpcConfig({ server, port, proxies, hosts, metas, ports }) {
     `serverAddr = ${toml(server)}`,
     `serverPort = ${Number(port)}`,
     'transport.tls.enable = true',
+    'transport.heartbeatInterval = 20',
+    'transport.tcpMuxKeepaliveInterval = 20',
     `metadatas = { ${Object.entries(metas).map(([k, v]) => `${k}=${toml(v)}`).join(', ')} }`,
   ]
   for (const [service, name] of Object.entries(proxies)) lines.push(
