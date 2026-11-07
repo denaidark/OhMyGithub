@@ -14,8 +14,8 @@ export function modelFailureReason(log) {
   // Provider wrappers report the status inside the message text ("Copilot /auto returned HTTP 401").
   const status = Number(failure.status) || Number(/HTTP\s+(\d{3})\b/.exec(message)?.[1]) || 0
   // Echo only short provider status lines, never arbitrary provider bodies or user text.
-  const safe = message.replace(/\s+/g, ' ').trim()
-  const detail = /^(?:Copilot|OpenCode|OpenRouter|GitHub) .{0,120}?\bHTTP \d{3}\b/.test(safe) ? ` (${safe.slice(0, 160)})` : ''
+  const safe = message.replace(/\s+/g, ' ').replace(/\. For more information.*$/, '').trim()
+  const detail = /^(?:Copilot|OpenCode|OpenRouter|GitHub) .{0,120}?\bHTTP \d{3}\b/.test(safe) || /^Transport: .{0,140}$/.test(safe) ? ` (${safe.slice(0, 160)})` : ''
   if (type === 'provider.free-limit' || /FreeUsageLimit|free usage limit/i.test(message)) return 'We’re running low on spare robot brains. Please try again in a moment!'
   if (status === 429 || /rate.limit/i.test(type)) return `The model provider rate limit was reached${detail}. Wait for quota to reset or choose a model with available quota.`
   if ([401, 403].includes(status)) return `The model provider rejected its credentials${detail}. Check the connected provider in Settings.`

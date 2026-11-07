@@ -19,6 +19,7 @@ test('report free quota, rate limits, and rejected credentials without echoing p
 test('read the provider status from the message text and echo only short provider lines', () => {
   assert.match(modelFailureReason(event({ type: 'unknown', message: 'Copilot /auto returned HTTP 401' })), /credentials .*HTTP 401/)
   assert.match(modelFailureReason(event({ type: 'unknown', message: 'Copilot /auto returned HTTP 502' })), /could not complete .*HTTP 502/)
+  assert.match(modelFailureReason(event({ message: 'Transport: ECONNRESET: socket closed' })), /could not complete .*ECONNRESET/)
   assert.doesNotMatch(modelFailureReason(event({ message: 'sk-abcdefghijklmnopqrstuvwxyz' })), /sk-/)
   assert.doesNotMatch(modelFailureReason(event({ message: 'sensitive detail' })), /sensitive detail/)
 })
