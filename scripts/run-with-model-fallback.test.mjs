@@ -3,7 +3,16 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels } from './run-with-model-fallback.mjs'
+import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine } from './run-with-model-fallback.mjs'
+
+test('name the fusion endpoint behind a failed attempt without leaking credentials', () => {
+  assert.equal(fusionUpstreamHost({ FUSION_UPSTREAM: 'https://omgithub.com/api/fusion-pool?token=secret' }), 'omgithub.com')
+  assert.equal(fusionUpstreamHost({}), 'unknown')
+  const line = fusionFailureLine({ message: 'Copilot /auto returned HTTP 502' }, { FUSION_UPSTREAM: 'https://omgithub.com/api/fusion-pool' })
+  assert.match(line, /fusion upstream omgithub\.com/)
+  assert.match(line, /HTTP 502/)
+  assert.doesNotMatch(line, /token|secret/)
+})
 
 test('default chain order comes from model-chain.json; picked models fall back to it', () => {
   const [deepseek, glm, mimo, pickle] = preferredFreeModels

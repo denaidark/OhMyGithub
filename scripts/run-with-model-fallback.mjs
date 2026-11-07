@@ -87,6 +87,16 @@ export function fusionFallbackError(model, error) {
   return [401, 403, 404, 429, 500, 502, 503, 504].includes(status) ||
     /Copilot \/auto|Fusion|Refuse fallback|Unexpected server error|quota|usage limit|chat limit|model.*not found/i.test(`${type} ${message}`)
 }
+/** Host of the configured Fusion endpoint. Never includes credentials or query text. */
+export function fusionUpstreamHost(env = process.env) {
+  try { return new URL(String(env.FUSION_UPSTREAM || '')).host || 'unknown' } catch { return 'unknown' }
+}
+/** One sanitized line naming the Fusion endpoint behind a failed attempt. */
+export function fusionFailureLine(failure, env = process.env) {
+  const message = String(failure?.message || failure?.type || 'unknown error').replace(/\s+/g, ' ').slice(0, 160)
+  const status = Number(failure?.status) || 0
+  return `[model-fallback] fusion upstream ${fusionUpstreamHost(env)} reported ${message}${status ? ` (status ${status})` : ''}\n`
+}
 export async function terminalAttemptOutcome({ api, sessionID, started, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (!api || !/^ses_[A-Za-z0-9]+$/.test(sessionID)) return null
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -219,6 +229,7 @@ export async function runModels({ binary, port, promptFile, logFile, exitFile, s
       await reportSessionStats({ api, sessionID, directory, env, attempts })
       await pingHeartbeat(env)
       appendFileSync(logFile, `[timing] model ${model}: ${Date.now() - started} ms; cli exit ${cliCode}; terminal ${outcome || 'unverified'}; exit ${code}\n`)
+      if (code !== 0 && model === fusionModel && failure) appendFileSync(logFile, fusionFailureLine(failure, env))
       if (code !== 0 && !interrupted && !dropped && proxyTunnelError(failure)) {
         dropped = true; switched = true
         const drop = dropProxy === undefined ? proxyDrop({ env, binary, logFile }) : dropProxy
