@@ -114,6 +114,15 @@ test('MCP-only accounts configure OpenCode outside the checkout, mask run creden
   assert.equal(existsSync(join(f.dir, 'omgithub-account-credentials/mcp.json')), false)
 })
 
+test('backup endpoint settings survive a missing web directory', async t => {
+  const f = fixture(t, {}, initial, undefined, { backup_model: 'omdev/deepseek-v4.1-flash-free', backup_host: 'llm.ondev.store' })
+  f.env.OPENCODE_WEB_DIR = join(f.dir, 'missing-web')
+  await f.client.load()
+  const env = readFileSync(f.env.GITHUB_ENV, 'utf8')
+  assert.match(env, /OMG_BACKUP_MODEL<<[^\n]+\nomdev\/deepseek-v4\.1-flash-free\n/)
+  assert.match(env, /OMG_BACKUP_HOST<<[^\n]+\nllm\.ondev\.store\n/)
+  assert.equal(readFileSync(join(f.dir, 'missing-web', 'backup-host'), 'utf8').trim(), 'llm.ondev.store')
+})
 test('custom endpoint providers merge into OpenCode config without replacing workflow providers', async t => {
   const providers = { acme: { name: 'Acme', package: '@opencode/ai/providers/openai-compatible', settings: { baseURL: 'https://llm.acme.test/v1' }, models: { coder: { name: 'Coder' } } } }
   const f = fixture(t, { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: 'test/model', providers: { workflow: { name: 'Workflow' } } }) }, initial, undefined, { providers })

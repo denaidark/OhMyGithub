@@ -97,7 +97,8 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
       const host = typeof data.backup_host === 'string' ? data.backup_host.trim() : ''
       if (/^[a-z0-9.-]+$/i.test(host)) {
         writeEnv(env.GITHUB_ENV, 'OMG_BACKUP_HOST', host)
-        if (env.OPENCODE_WEB_DIR) writeFileSync(join(env.OPENCODE_WEB_DIR, 'backup-host'), host + '\n', { mode: 0o600 })
+        // The web directory may not exist yet; the env var alone is enough for the serve step.
+        try { mkdirSync(env.OPENCODE_WEB_DIR, { recursive: true, mode: 0o700 }); writeFileSync(join(env.OPENCODE_WEB_DIR, 'backup-host'), host + '\n', { mode: 0o600 }) } catch { /* keep OMG_BACKUP_HOST */ }
       }
     }
     remember(data.secrets)
