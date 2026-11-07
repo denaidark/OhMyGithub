@@ -5,11 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine, appendBackupModel } from './run-with-model-fallback.mjs'
 
-test('the backup endpoint is tried only after every chain model', () => {
-  const chain = ['copilot-fusion-direct/fusion', 'opencode/deepseek-v4.1-flash-free']
-  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }), [...chain, 'omdev/deepseek-v4.1-flash-free'])
+test('the backup endpoint runs after every model but before Fusion', () => {
+  const chain = ['opencode/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion', 'opencode/glm-5.3-flash-free']
+  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }),
+    ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'omdev/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
   assert.deepEqual(appendBackupModel(chain, {}), chain)
-  assert.deepEqual(appendBackupModel([...chain, 'omdev/deepseek-v4.1-flash-free'], { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }), [...chain, 'omdev/deepseek-v4.1-flash-free'])
+  assert.deepEqual(appendBackupModel(['copilot-fusion-direct/fusion'], { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }),
+    ['omdev/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
   assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'not a model' }), chain)
 })
 

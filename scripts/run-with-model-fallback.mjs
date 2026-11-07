@@ -118,11 +118,16 @@ export async function terminalAttemptOutcome({ api, sessionID, started, pause = 
 export function freeEgressModel(model) {
   return model !== fusionModel && (preferredFreeModels.includes(model) || /^opencode\/[\w.-]+-free$/.test(String(model)))
 }
-/** Append the admin-configured backup endpoint as the last resort, once. */
+/**
+ * Place the admin-configured backup endpoint after every model but before Fusion.
+ * Fusion moves to the very end so a free-model failure never jumps straight to a shared donor.
+ */
 export function appendBackupModel(candidates, env = process.env) {
   const backup = String(env.OMG_BACKUP_MODEL || '').trim()
-  if (!backup || candidates.includes(backup) || !/^[\w.-]+\/[\w./:-]+$/.test(backup)) return candidates
-  return [...candidates, backup]
+  if (!backup || !/^[\w.-]+\/[\w./:-]+$/.test(backup)) return candidates
+  const queue = candidates.filter(model => model !== backup && model !== fusionModel)
+  const fusion = candidates.includes(fusionModel) ? [fusionModel] : []
+  return [...queue, backup, ...fusion]
 }
 // Runtime egress switch: when WARP passed its startup probe (WARP_RUNTIME_SWITCH=1) but a free
 // model still hits FreeUsageLimit mid-build, move `opencode serve` to the DataImpulse relay once.
