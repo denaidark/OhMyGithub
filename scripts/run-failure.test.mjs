@@ -16,6 +16,12 @@ test('report free quota, rate limits, and rejected credentials without echoing p
   assert.match(modelFailureReason(event({ type: 'model-not-found' })), /model is unavailable/)
   assert.match(modelFailureReason(event({ message: 'sensitive detail' })), /could not complete/)
 })
+test('read the provider status from the message text and echo only short provider lines', () => {
+  assert.match(modelFailureReason(event({ type: 'unknown', message: 'Copilot /auto returned HTTP 401' })), /credentials .*HTTP 401/)
+  assert.match(modelFailureReason(event({ type: 'unknown', message: 'Copilot /auto returned HTTP 502' })), /could not complete .*HTTP 502/)
+  assert.doesNotMatch(modelFailureReason(event({ message: 'sk-abcdefghijklmnopqrstuvwxyz' })), /sk-/)
+  assert.doesNotMatch(modelFailureReason(event({ message: 'sensitive detail' })), /sensitive detail/)
+})
 test('ignore tool text and malformed lines; select the last structured error', () => {
   assert.match(modelFailureReason('{bad\n' + JSON.stringify({ type: 'tool_use', error: { type: 'provider.free-limit' } })), /workflow failed/)
   assert.match(modelFailureReason(event({ status: 429 }) + '\n' + event({ status: 403 })), /credentials/)
