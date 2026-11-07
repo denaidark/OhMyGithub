@@ -40,7 +40,9 @@ export function retryableProviderError(error) {
   if (!error || typeof error !== 'object') return false
   const type = String(error.type || ''), message = String(error.message || '')
   return [429, 500, 502, 503, 504].includes(Number(error.status)) || ['provider.free-limit', 'provider.rate-limit', 'provider.overloaded', 'provider.model-not-found'].includes(type) ||
-    /FreeUsageLimit|ModelDeprecated|model.*(?:not found|unavailable|deprecated)|free usage limit|rate.limit/i.test(message)
+    /FreeUsageLimit|ModelDeprecated|model.*(?:not found|unavailable|deprecated)|free usage limit|rate.limit/i.test(message) ||
+    // A dropped upstream stream is worth another model, not a failed build.
+    /upstream connection lost|connection (?:lost|reset|closed)|ECONNRESET|fetch failed|socket hang up|terminated/i.test(message)
 }
 // The local proxy relay (WARP wireproxy or DataImpulse) could not open a tunnel,
 // e.g. DataImpulse 407 TRAFFIC_EXHAUSTED surfaced as `502 Upstream Proxy Error`.

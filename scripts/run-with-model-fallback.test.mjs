@@ -48,6 +48,7 @@ test('default chain order comes from model-chain.json; picked models fall back t
 })
 test('only retry structured provider/model availability failures', () => {
   for (const error of [{ type: 'provider.free-limit' }, { status: 429 }, { status: 503 }, { message: 'ModelDeprecated' }]) assert.equal(retryableProviderError(error), true)
+  for (const error of [{ message: 'upstream connection lost' }, { message: 'read ECONNRESET' }, { message: 'fetch failed' }]) assert.equal(retryableProviderError(error), true)
   for (const error of [undefined, { type: 'tool.error' }, { status: 401 }, { message: 'Game build failed' }]) assert.equal(retryableProviderError(error), false)
 })
 test('advance from Fusion on auth, quota, gateway, and route failures only', () => {
