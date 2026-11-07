@@ -118,6 +118,12 @@ export async function terminalAttemptOutcome({ api, sessionID, started, pause = 
 export function freeEgressModel(model) {
   return model !== fusionModel && (preferredFreeModels.includes(model) || /^opencode\/[\w.-]+-free$/.test(String(model)))
 }
+/** Append the admin-configured backup endpoint as the last resort, once. */
+export function appendBackupModel(candidates, env = process.env) {
+  const backup = String(env.OMG_BACKUP_MODEL || '').trim()
+  if (!backup || candidates.includes(backup) || !/^[\w.-]+\/[\w./:-]+$/.test(backup)) return candidates
+  return [...candidates, backup]
+}
 // Runtime egress switch: when WARP passed its startup probe (WARP_RUNTIME_SWITCH=1) but a free
 // model still hits FreeUsageLimit mid-build, move `opencode serve` to the DataImpulse relay once.
 // The script's stdout only carries ::add-mask:: lines and is discarded; its stderr (no secrets) goes to the run log.
@@ -168,6 +174,8 @@ export async function runModels({ binary, port, promptFile, logFile, exitFile, s
   if (!candidates.length || candidates.some(model => typeof model !== 'string' || !/^[\w.-]+\/[\w./:-]+$/.test(model))) throw new Error('Invalid model fallback candidates')
   // Preserve the existing connected OpenRouter fallback after the free-model chain.
   if (candidates.some(model => preferredFreeModels.includes(model)) && env.OPENROUTER_API_KEY && !candidates.includes(openrouterFallbackModel)) candidates.push(openrouterFallbackModel)
+  // Last resort: the site-wide backup endpoint, only after every chain model failed.
+  const queue = appendBackupModel(candidates, env)
   let sessionID = env.RESUME_SESSION_ID || '', child, interrupted = false, code = 1
   const attempts = []
   let switched = false, dropped = false
@@ -175,8 +183,8 @@ export async function runModels({ binary, port, promptFile, logFile, exitFile, s
   const onTerm = () => stop('SIGTERM'), onInt = () => stop('SIGINT')
   process.on('SIGTERM', onTerm); process.on('SIGINT', onInt)
   try {
-    for (let index = 0; index < candidates.length; index++) {
-      const model = candidates[index]
+    for (let index = 0; index < queue.length; index++) {
+      const model = queue[index]
       if (interrupted) break
       if (lazyProxy && freeEgressModel(model)) {
         const setup = lazyProxy; lazyProxy = null

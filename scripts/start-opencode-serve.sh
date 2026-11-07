@@ -22,6 +22,10 @@ fi
 clean=(env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN)
 if [[ -n "$proxy" ]]; then
   no_proxy_hosts='localhost,127.0.0.1,::1,github.com,.github.com,githubusercontent.com,.githubusercontent.com,githubcopilot.com,.githubcopilot.com'
+  # The admin-configured backup endpoint must never go through WARP.
+  backup_host="${OMG_BACKUP_HOST:-}"
+  if [[ -z "$backup_host" && -s "$OPENCODE_WEB_DIR/backup-host" ]]; then backup_host="$(tr -d '[:space:]' < "$OPENCODE_WEB_DIR/backup-host")"; fi
+  [[ "$backup_host" =~ ^[A-Za-z0-9.-]+$ ]] && no_proxy_hosts="$no_proxy_hosts,$backup_host"
   clean+=(HTTPS_PROXY="$proxy" HTTP_PROXY="$proxy" https_proxy="$proxy" http_proxy="$proxy" NO_PROXY="$no_proxy_hosts" no_proxy="$no_proxy_hosts")
 else
   clean+=(-u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy)

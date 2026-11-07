@@ -91,6 +91,15 @@ export function createCredentialClient({ env = process.env, request = fetch, mas
       const content = JSON.stringify({ ...configured, providers: { ...providers, ...configured.providers } })
       writeEnv(env.GITHUB_ENV, 'OPENCODE_CONFIG_CONTENT', content)
     }
+    // Site-wide backup endpoint: the last link in the model chain, never routed through WARP.
+    if (typeof data.backup_model === 'string' && /^[\w.-]+\/[\w./:-]+$/.test(data.backup_model)) {
+      writeEnv(env.GITHUB_ENV, 'OMG_BACKUP_MODEL', data.backup_model)
+      const host = typeof data.backup_host === 'string' ? data.backup_host.trim() : ''
+      if (/^[a-z0-9.-]+$/i.test(host)) {
+        writeEnv(env.GITHUB_ENV, 'OMG_BACKUP_HOST', host)
+        if (env.OPENCODE_WEB_DIR) writeFileSync(join(env.OPENCODE_WEB_DIR, 'backup-host'), host + '\n', { mode: 0o600 })
+      }
+    }
     remember(data.secrets)
     const names = []
     for (const [name, value] of Object.entries(data.secrets || {})) {

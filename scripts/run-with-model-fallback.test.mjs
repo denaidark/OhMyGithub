@@ -3,7 +3,15 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine } from './run-with-model-fallback.mjs'
+import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine, appendBackupModel } from './run-with-model-fallback.mjs'
+
+test('the backup endpoint is tried only after every chain model', () => {
+  const chain = ['copilot-fusion-direct/fusion', 'opencode/deepseek-v4.1-flash-free']
+  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }), [...chain, 'omdev/deepseek-v4.1-flash-free'])
+  assert.deepEqual(appendBackupModel(chain, {}), chain)
+  assert.deepEqual(appendBackupModel([...chain, 'omdev/deepseek-v4.1-flash-free'], { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }), [...chain, 'omdev/deepseek-v4.1-flash-free'])
+  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'not a model' }), chain)
+})
 
 test('name the fusion endpoint behind a failed attempt without leaking credentials', () => {
   assert.equal(fusionUpstreamHost({ FUSION_UPSTREAM: 'https://omgithub.com/api/fusion-pool?token=secret' }), 'omgithub.com')
