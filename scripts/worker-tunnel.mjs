@@ -28,7 +28,7 @@ export async function workerTunnel(env, mode = 'start', request = fetch) {
     const ports = { oc: Number(env.OPENCODE_CONTROL_PORT), files: Number(env.PROJECT_FILE_PORT), live: Number(env.APP_PORT) }
     const response = await request(endpoint, { method: mode === 'start' ? 'POST' : 'DELETE', headers: {
       authorization: `Bearer ${env.OMGITHUB_CALLBACK_TOKEN}`, 'content-type': 'application/json'
-    }, body: JSON.stringify({ run: env.GITHUB_RUN_ID, attempt: Number(env.GITHUB_RUN_ATTEMPT || 1), ...(mode === 'start' ? { ports } : {}) }), signal: AbortSignal.timeout(120000) })
+    }, body: JSON.stringify({ run: env.GITHUB_RUN_ID, attempt: Number(env.GITHUB_RUN_ATTEMPT || 1), ...(mode === 'start' ? { ports, tunnel: 'frp' } : {}) }), signal: AbortSignal.timeout(120000) })
     if (!response.ok) throw new Error(`Worker tunnel ${mode}: HTTP ${response.status}`)
     if (mode !== 'start') return
     const { urls, frp } = await response.json()
