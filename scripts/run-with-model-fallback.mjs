@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url'
 const modelChain = JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8'))
 export const fusionModel = modelChain.fusion
 export const fullModelChain = modelChain.chain
-export const openrouterFallbackModel = modelChain.openrouterFallback
 export const preferredFreeModels = fullModelChain.filter(model => model !== fusionModel)
 export function defaultModelChain(fusionEnabled = false) {
   return fullModelChain.filter(model => fusionEnabled || model !== fusionModel)
@@ -177,8 +176,6 @@ export async function runModels({ binary, port, promptFile, logFile, exitFile, s
   const strictFusion = requiredShared && (env.FUSION_FORCE_SHARED_TEST === 'true' || !selected || selected === fusionModel || freeEgressModel(selected)) || env.FUSION_ROUTE === 'own' && selected === fusionModel
   const candidates = strictFusion ? [fusionModel] : [...new Set(models)].filter(model => !requiredShared || !freeEgressModel(model))
   if (!candidates.length || candidates.some(model => typeof model !== 'string' || !/^[\w.-]+\/[\w./:-]+$/.test(model))) throw new Error('Invalid model fallback candidates')
-  // Preserve the existing connected OpenRouter fallback after the free-model chain.
-  if (candidates.some(model => preferredFreeModels.includes(model)) && env.OPENROUTER_API_KEY && !candidates.includes(openrouterFallbackModel)) candidates.push(openrouterFallbackModel)
   // Last resort: the site-wide backup endpoint, only after every chain model failed.
   const queue = appendBackupModel(candidates, env)
   let sessionID = env.RESUME_SESSION_ID || '', child, interrupted = false, code = 1

@@ -98,11 +98,13 @@ test('stop immediately on success or unrelated failure; use connected fallback o
     try { const result = await runModels(f.options); assert.equal(result.attempts.length, 1) }
     finally { f.close() }
   }
-  const f = await fixture(['quota', 'quota', 'quota', 'quota', 'success'])
+  const f = await fixture(['quota', 'quota', 'quota', 'success'])
   try {
     const result = await runModels({ ...f.options, env: { ...f.options.env, OPENROUTER_API_KEY: 'configured' } })
     assert.equal(result.code, 0)
-    assert.equal(result.attempts.at(-1).model, 'openrouter/cohere/north-mini-code:free')
+    // A connected OpenRouter key no longer injects the north-mini-code fallback.
+    assert.equal(result.attempts.at(-1).model, 'opencode/big-pickle')
+    assert.ok(result.attempts.every(attempt => !/north-mini-code/.test(attempt.model)))
   } finally { f.close() }
 })
 test('Default with Fusion tries Fusion first, then DeepSeek', async () => {

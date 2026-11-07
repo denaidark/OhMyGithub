@@ -36,8 +36,6 @@ const preferred=["opencode/deepseek-v4.1-flash-free","opencode/glm-5.3-flash-fre
 const usable=m=>m&&m.status!=="deprecated"&&m.tool_call===true&&m.cost?.input===0&&m.cost?.output===0;
 let ids=preferred;
 try{const r=await fetch("https://models.opencode.ai/api.json",{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error(`HTTP ${r.status}`);const m=(await r.json()).opencode?.models||{};const live=preferred.filter(id=>usable(m[id.slice("opencode/".length)]));if(live.length)ids=live}catch{}
-// Anonymous free tier is rate limited; a connected provider keeps the run testable.
-if(process.env.OPENROUTER_API_KEY)ids.push("openrouter/cohere/north-mini-code:free");
 console.log(JSON.stringify(ids))')"
 echo "Model fallback order: $models"
 prompt='Create v2-test-result.txt containing exactly ACTIONS_V2_OK. Do not use git. Reply DONE when finished.'
