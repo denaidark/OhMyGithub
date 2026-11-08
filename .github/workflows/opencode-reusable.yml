@@ -598,6 +598,13 @@ jobs:
           set -euo pipefail
           /usr/bin/time -p bash "$RUNTIME_DIR/scripts/setup-mac-playwright.sh"
 
+      - name: Cache FRP client
+        if: env.SSH_ONLY_REQUEST != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/frp-cache
+          key: frp-0.71.1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/scripts/download-frp.sh') }}
+
       - name: Start OpenCode web UI and Cloudflare tunnel
         id: opencode_web
         if: env.SSH_ONLY_REQUEST != 'true'
@@ -832,10 +839,7 @@ jobs:
             macOS/ARM64) FRP_ASSET="darwin_arm64" ;;
             *) echo "Unsupported runner platform: $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
           esac
-          curl --fail --silent --show-error --location --output "$OPENCODE_WEB_DIR/frp.tgz" \
-            "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_${FRP_ASSET}.tar.gz"
-          tar -xzf "$OPENCODE_WEB_DIR/frp.tgz" -C "$OPENCODE_WEB_DIR" --strip-components=1 "frp_${FRP_VERSION}_${FRP_ASSET}/frpc"
-          chmod 755 "$OPENCODE_WEB_DIR/frpc"
+          /usr/bin/time -p bash "$RUNTIME_DIR/scripts/download-frp.sh" "$FRP_VERSION" "$FRP_ASSET" "$OPENCODE_WEB_DIR" "$RUNNER_TEMP/frp-cache"
           export OPENCODE_CONTROL_PORT OPENCODE_WEB_PORT
           export GH_TOKEN='${{ github.token }}'
           nohup node "$RUNTIME_DIR/scripts/session-lifecycle.mjs" > "$OPENCODE_WEB_DIR/lifecycle.log" 2>&1 &
