@@ -47,13 +47,13 @@ export function determineSelectionType(selected, fusionRoute = 'none') {
   if (!selected || selected === 'default') {
     return SelectionType.DEFAULT
   }
-  // Explicit Fusion selection with 'own' route → EXPLICIT_FUSION_ONLY (strict Fusion usage)
-  // Fusion selection without 'own' route → DEFAULT (will use shared pool like default)
+  // Fix #7 (corrected): Selection type is INTENT-based, independent of FUSION_ROUTE availability
+  // User explicitly selected Fusion model → EXPLICIT_FUSION_ONLY (strict Fusion, no DeepSeek fallback)
+  // Route availability determines which Fusion routes are in the queue, not the selection type
   if (selected === fusionModel) {
-    return fusionRoute === 'own' ? SelectionType.EXPLICIT_FUSION_ONLY : SelectionType.DEFAULT
+    return SelectionType.EXPLICIT_FUSION_ONLY
   }
   // Explicit DeepSeek or other free model selection
-  // Fix #7: Preserve exact selected model ID, don't substitute defaultFreeModel
   if (freeEgressModel(selected)) {
     return SelectionType.EXPLICIT_DEEPSEEK
   }

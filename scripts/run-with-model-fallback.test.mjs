@@ -23,15 +23,17 @@ test('model-chain.json structure', () => {
   assert.deepEqual(chain.chain, [fusionModel, deepseek])
 })
 
-test('determineSelectionType correctly classifies user selections', () => {
-  // Default: no selection or fusionModel without 'own' route
+test('determineSelectionType correctly classifies user selections (intent-based, route-independent)', () => {
+  // Default: no selection or "default" label
   assert.equal(determineSelectionType(null), SelectionType.DEFAULT)
   assert.equal(determineSelectionType(''), SelectionType.DEFAULT)
   assert.equal(determineSelectionType('default'), SelectionType.DEFAULT)
-  assert.equal(determineSelectionType(fusionModel, 'none'), SelectionType.DEFAULT)
-  assert.equal(determineSelectionType(fusionModel, 'shared'), SelectionType.DEFAULT)
   
-  // Explicit Fusion-only: fusionModel with 'own' route
+  // Fix #7 (corrected): Explicit Fusion-only is INTENT-based, independent of FUSION_ROUTE
+  // User explicitly selected Fusion → EXPLICIT_FUSION_ONLY regardless of route availability
+  assert.equal(determineSelectionType(fusionModel), SelectionType.EXPLICIT_FUSION_ONLY)
+  assert.equal(determineSelectionType(fusionModel, 'none'), SelectionType.EXPLICIT_FUSION_ONLY)
+  assert.equal(determineSelectionType(fusionModel, 'shared'), SelectionType.EXPLICIT_FUSION_ONLY)
   assert.equal(determineSelectionType(fusionModel, 'own'), SelectionType.EXPLICIT_FUSION_ONLY)
   
   // Explicit DeepSeek
