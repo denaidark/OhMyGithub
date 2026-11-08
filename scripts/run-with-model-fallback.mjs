@@ -120,15 +120,25 @@ export function freeEgressModel(model) {
   return model !== fusionModel && (preferredFreeModels.includes(model) || /^opencode\/[\w.-]+-free$/.test(String(model)))
 }
 /**
- * Place the admin-configured backup endpoint after every model but before Fusion.
+ * Place the admin-configured backup endpoint after every free model but before Fusion.
  * Fusion moves to the very end so a free-model failure never jumps straight to a shared donor.
+ * 
+ * IMPORTANT: If the chain is Fusion-only (no free models), backup is NOT inserted.
+ * This preserves explicit Fusion selection without falling back to ondev gateway.
  */
 export function appendBackupModel(candidates, env = process.env) {
   const backup = String(env.OMG_BACKUP_MODEL || '').trim()
   if (!backup || !/^[\w.-]+\/[\w./:-]+$/.test(backup)) return candidates
-  const queue = candidates.filter(model => model !== backup && model !== fusionModel)
-  const fusion = candidates.includes(fusionModel) ? [fusionModel] : []
-  return [...queue, backup, ...fusion]
+  // Fusion-only: never insert backup - respect explicit user choice
+  const nonFusion = candidates.filter(model => model !== fusionModel)
+  if (nonFusion.length === 0) return candidates
+  // Preserve leading Fusion (user has Copilot, Fusion is primary)
+  const startsWithFusion = candidates[0] === fusionModel
+  // Insert backup after free models, before trailing Fusion (shared Fusion fallback)
+  const queue = nonFusion.filter(model => model !== backup)
+  const trailingFusion = !startsWithFusion && candidates.includes(fusionModel) ? [fusionModel] : []
+  const leadingFusion = startsWithFusion ? [fusionModel] : []
+  return [...leadingFusion, ...queue, backup, ...trailingFusion]
 }
 // Runtime egress switch: when WARP passed its startup probe (WARP_RUNTIME_SWITCH=1) but a free
 // model still hits FreeUsageLimit mid-build, move `opencode serve` to the DataImpulse relay once.

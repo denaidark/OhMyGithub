@@ -5,14 +5,26 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine, appendBackupModel } from './run-with-model-fallback.mjs'
 
-test('the backup endpoint runs after every model but before Fusion', () => {
-  const chain = ['opencode/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion', 'opencode/glm-5.3-flash-free']
-  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }),
-    ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'omdev/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
-  assert.deepEqual(appendBackupModel(chain, {}), chain)
-  assert.deepEqual(appendBackupModel(['copilot-fusion-direct/fusion'], { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }),
-    ['omdev/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
-  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'not a model' }), chain)
+test('the backup endpoint runs after every free model but before trailing Fusion; Fusion-only never gets backup', () => {
+  const backup = { OMG_BACKUP_MODEL: 'omdev/oc/deepseek-v4.1-flash-free' }
+  // DeepSeek leads (no Copilot, shared Fusion fallback): backup inserted after free models, before trailing Fusion
+  const freeFirst = ['opencode/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion']
+  assert.deepEqual(appendBackupModel(freeFirst, backup),
+    ['opencode/deepseek-v4.1-flash-free', 'omdev/oc/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
+  // Fusion leads (user has Copilot): Fusion stays first, backup after free models, NO trailing Fusion duplicate
+  const fusionFirst = ['copilot-fusion-direct/fusion', 'opencode/deepseek-v4.1-flash-free']
+  assert.deepEqual(appendBackupModel(fusionFirst, backup),
+    ['copilot-fusion-direct/fusion', 'opencode/deepseek-v4.1-flash-free', 'omdev/oc/deepseek-v4.1-flash-free'])
+  // Invalid/missing backup: no change
+  assert.deepEqual(appendBackupModel(freeFirst, {}), freeFirst)
+  assert.deepEqual(appendBackupModel(freeFirst, { OMG_BACKUP_MODEL: 'not a model' }), freeFirst)
+  // CRITICAL: Fusion-only chain must NOT get backup - preserves user's explicit Fusion choice
+  assert.deepEqual(appendBackupModel(['copilot-fusion-direct/fusion'], backup),
+    ['copilot-fusion-direct/fusion'], 'Fusion-only must never fall back to ondev backup')
+  // Multiple free models case (DeepSeek leads)
+  const extendedChain = ['opencode/deepseek-v4.1-flash-free', 'opencode/other-free', 'copilot-fusion-direct/fusion']
+  assert.deepEqual(appendBackupModel(extendedChain, backup),
+    ['opencode/deepseek-v4.1-flash-free', 'opencode/other-free', 'omdev/oc/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
 })
 
 test('name the fusion endpoint behind a failed attempt without leaking credentials', () => {
@@ -25,25 +37,24 @@ test('name the fusion endpoint behind a failed attempt without leaking credentia
 })
 
 test('default chain order comes from model-chain.json; picked models fall back to it', () => {
-  const [deepseek, glm, mimo, pickle] = preferredFreeModels
-  assert.deepEqual(JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8')).chain, [fusionModel, deepseek, glm, mimo, pickle])
-  assert.deepEqual(preferredFreeModels, ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle'])
+  const [deepseek] = preferredFreeModels
+  // Simplified chain: only DeepSeek free model, no glm/mimo/big-pickle
+  assert.deepEqual(JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8')).chain, [fusionModel, deepseek])
+  assert.deepEqual(preferredFreeModels, ['opencode/deepseek-v4.1-flash-free'])
   // Without Fusion
   assert.deepEqual(defaultModelChain(false), preferredFreeModels)
   assert.deepEqual(modelCandidates(deepseek), preferredFreeModels)
-  assert.deepEqual(modelCandidates(glm), [glm, deepseek, mimo, pickle])
-  assert.deepEqual(modelCandidates(deepseek, [deepseek, pickle]), [deepseek, pickle])
   assert.deepEqual(modelCandidates('openai/gpt-6-astra'), ['openai/gpt-6-astra', ...preferredFreeModels], 'hand-picked models fall back to the default chain')
-  assert.deepEqual(modelCandidates('opencode/beam-free', ['opencode/beam-free', glm]), ['opencode/beam-free', glm])
+  // When beam-free is live, it's used; deepseek is still added as fallback since it's in the chain
+  assert.deepEqual(modelCandidates('opencode/beam-free', ['opencode/beam-free', deepseek]), ['opencode/beam-free', deepseek])
   assert.deepEqual(modelCandidates(deepseek, ['opencode/other-free']), preferredFreeModels, 'none live: keep the list')
   // With Fusion (Copilot): Fusion first, then the free chain
   const chain = defaultModelChain(true)
-  assert.deepEqual(chain, [fusionModel, deepseek, glm, mimo, pickle])
+  assert.deepEqual(chain, [fusionModel, deepseek])
   assert.deepEqual(modelCandidates(chain[0], null, chain), chain)
-  assert.deepEqual(modelCandidates(fusionModel, null, chain), [fusionModel, deepseek, glm, mimo, pickle])
-  assert.deepEqual(modelCandidates(glm, null, chain), [glm, fusionModel, deepseek, mimo, pickle])
+  assert.deepEqual(modelCandidates(fusionModel, null, chain), [fusionModel, deepseek])
   assert.deepEqual(modelCandidates('openai/gpt-6-astra', null, chain), ['openai/gpt-6-astra', ...chain])
-  assert.deepEqual(modelCandidates(deepseek, [deepseek, mimo], chain), [deepseek, fusionModel, mimo])
+  assert.deepEqual(modelCandidates(deepseek, [deepseek], chain), [deepseek, fusionModel])
   assert.deepEqual(modelCandidates(fusionModel, null, preferredFreeModels), [fusionModel, ...preferredFreeModels])
 })
 test('only retry structured provider/model availability failures', () => {
@@ -71,24 +82,28 @@ process.exit(outcome==='success'||outcome==='zero-error'?0:1);
     env: { ...process.env, OPENROUTER_API_KEY: '', PROJECT_DIR: directory, PATTERN: JSON.stringify(pattern), RESUME_SESSION_ID: resume } }, close: () => rmSync(directory, { recursive: true, force: true }) }
 }
 test('try the sequence until success; retain exact prompt and main session across attempts', async () => {
-  const f = await fixture(['quota', 'quota', 'success'])
+  // With simplified chain: deepseek → backup → fusion
+  const f = await fixture(['quota', 'success'])
   try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     const result = await runModels(f.options), calls = JSON.parse(readFileSync(join(f.directory, 'calls.json')))
     assert.equal(result.code, 0)
-    assert.deepEqual(result.attempts.map(row => row.model), preferredFreeModels.slice(0, 3))
+    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], 'omdev/oc/deepseek-v4.1-flash-free'])
     assert.equal(calls[0].includes('--session'), false)
     assert.equal(calls[1][calls[1].indexOf('--session') + 1], 'ses_main')
     assert.ok(calls.every(args => args.at(-1) === f.prompt))
     assert.equal(readFileSync(join(f.directory, 'run.exit'), 'utf8').trim(), '0')
-    assert.equal(readFileSync(join(f.directory, 'main-model'), 'utf8').trim(), preferredFreeModels[2])
+    assert.equal(readFileSync(join(f.directory, 'main-model'), 'utf8').trim(), 'omdev/oc/deepseek-v4.1-flash-free')
   } finally { f.close() }
 })
-test('exhaust all four models, handle zero-exit provider errors, and report failure once', async () => {
-  const f = await fixture(['zero-error', 'quota', 'quota', 'quota'], 'ses_restored')
+test('exhaust all models (deepseek + backup), handle zero-exit provider errors, and report failure once', async () => {
+  // Chain: deepseek → backup (no Fusion in this test)
+  const f = await fixture(['zero-error', 'quota'], 'ses_restored')
   try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     const result = await runModels(f.options), calls = JSON.parse(readFileSync(join(f.directory, 'calls.json')))
     assert.equal(result.code, 1)
-    assert.equal(calls.length, 4)
+    assert.equal(calls.length, 2)
     assert.equal(calls[0][calls[0].indexOf('--session') + 1], 'ses_restored')
     assert.equal(readFileSync(join(f.directory, 'run.exit'), 'utf8').trim(), '1')
   } finally { f.close() }
@@ -99,12 +114,14 @@ test('stop immediately on success or unrelated failure; use connected fallback o
     try { const result = await runModels(f.options); assert.equal(result.attempts.length, 1) }
     finally { f.close() }
   }
-  const f = await fixture(['quota', 'quota', 'quota', 'success'])
+  // With backup model: deepseek → backup exhaustion test
+  const f = await fixture(['quota', 'success'])
   try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     const result = await runModels({ ...f.options, env: { ...f.options.env, OPENROUTER_API_KEY: 'configured' } })
     assert.equal(result.code, 0)
-    // A connected OpenRouter key no longer injects the north-mini-code fallback.
-    assert.equal(result.attempts.at(-1).model, 'opencode/big-pickle')
+    // With simplified chain, backup is the last free model before Fusion
+    assert.equal(result.attempts.at(-1).model, 'omdev/oc/deepseek-v4.1-flash-free')
     assert.ok(result.attempts.every(attempt => !/north-mini-code/.test(attempt.model)))
   } finally { f.close() }
 })
@@ -118,16 +135,26 @@ test('Default with Fusion tries Fusion first, then DeepSeek', async () => {
   } finally { f.close() }
 })
 test('lazy proxy runs once, only when the chain reaches a free model', async () => {
-  for (const [outcomes, calls] of [[['success'], 0], [['fusion-auth', 'quota', 'success'], 1]]) {
-    const f = await fixture(outcomes)
-    try {
-      let lazy = 0
-      const chain = defaultModelChain(true)
-      const result = await runModels({ ...f.options, selected: chain[0], models: modelCandidates(chain[0], null, chain), switchProxy: null, lazyProxy: async () => { lazy++; return 'none' } })
-      assert.equal(result.code, 0)
-      assert.equal(lazy, calls)
-    } finally { f.close() }
-  }
+  // Test 1: Fusion succeeds immediately → no lazy proxy call
+  const f1 = await fixture(['success'])
+  try {
+    let lazy = 0
+    const chain = defaultModelChain(true)
+    const result = await runModels({ ...f1.options, selected: chain[0], models: modelCandidates(chain[0], null, chain), switchProxy: null, lazyProxy: async () => { lazy++; return 'none' } })
+    assert.equal(result.code, 0)
+    assert.equal(lazy, 0, 'Fusion success: no lazy proxy')
+  } finally { f1.close() }
+
+  // Test 2: Fusion fails → lazy proxy called when reaching free model → backup succeeds
+  const f2 = await fixture(['fusion-auth', 'quota', 'success'])
+  try {
+    f2.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    let lazy = 0
+    const chain = defaultModelChain(true)
+    const result = await runModels({ ...f2.options, selected: chain[0], models: modelCandidates(chain[0], null, chain), switchProxy: null, lazyProxy: async () => { lazy++; return 'none' } })
+    assert.equal(result.code, 0)
+    assert.equal(lazy, 1, 'Fusion fail, free model reached: lazy proxy called once')
+  } finally { f2.close() }
 })
 test('a picked Fusion advances to the free chain on its auth failure', async () => {
   const f = await fixture(['fusion-auth', 'success'])
@@ -179,22 +206,26 @@ test('a fresh interrupted terminal outcome stops the model sequence', async () =
   } finally { f.close() }
 })
 test('runtime switch: first free-limit on WARP switches to DataImpulse once and retries the same model', async () => {
+  // With backup model: deepseek (WARP) → deepseek retry (DataImpulse) → backup
   const f = await fixture(['quota', 'quota', 'success'])
   try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     let switches = 0
     const result = await runModels({ ...f.options, switchProxy: async () => { switches++; return true } })
     assert.equal(result.code, 0)
     assert.equal(switches, 1, 'switch only once per build')
-    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], preferredFreeModels[0], preferredFreeModels[1]])
+    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], preferredFreeModels[0], 'omdev/oc/deepseek-v4.1-flash-free'])
     assert.equal(result.attempts[0].proxy_switch, 'ok')
     assert.match(readFileSync(f.options.logFile, 'utf8'), /retrying opencode\/deepseek/)
   } finally { f.close() }
 })
 test('runtime switch: a failed switch keeps going down the chain', async () => {
+  // With backup: deepseek → backup on switch failure
   const f = await fixture(['quota', 'success'])
   try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     const result = await runModels({ ...f.options, switchProxy: async () => false })
-    assert.deepEqual(result.attempts.map(row => row.model), preferredFreeModels.slice(0, 2))
+    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], 'omdev/oc/deepseek-v4.1-flash-free'])
     assert.equal(result.attempts[0].proxy_switch, 'failed')
   } finally { f.close() }
 })
@@ -228,6 +259,7 @@ test('dead proxy (502 Upstream Proxy Error / TRAFFIC_EXHAUSTED) drops the proxy 
     assert.equal(result.code, 0)
     assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], preferredFreeModels[0]])
   } finally { f.close() }
+  // Without backup, single model exhausted after proxy drop failure
   const g = await fixture(['proxy'])
   try {
     const result = await runModels({ ...g.options, dropProxy: null })
@@ -248,4 +280,61 @@ test('normal shared and own Fusion primaries cannot silently fall through after 
 
 test('normal shared fixes free-first labels without overriding explicit connected providers; admin force overrides both',()=>{
  assert.deepEqual(resolveRunModels({selected:'openai/gpt-6-astra',fusionEnabled:true,requireShared:true}).models,['openai/gpt-6-astra',fusionModel]);assert.deepEqual(resolveRunModels({selected:'openai/gpt-6-astra',fusionEnabled:true,requireShared:true,forceSharedTest:true}).models,[fusionModel])
+})
+
+test('full fallback chain: DeepSeek WARP fail → ondev backup → shared Fusion', async () => {
+  // Chain WITHOUT Copilot (no Fusion at startup): DeepSeek → backup → shared Fusion
+  // This tests the "default DeepSeek builds" fallback order per the spec
+  const f = await fixture(['quota', 'quota', 'success'])
+  try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    // User has NO Copilot - DeepSeek leads, shared Fusion available as last resort
+    const chain = [preferredFreeModels[0], fusionModel]  // DeepSeek first, then shared Fusion
+    const result = await runModels({
+      ...f.options,
+      selected: chain[0],
+      models: chain,
+      switchProxy: null, // No WARP available
+      lazyProxy: async () => 'none' // Proxy setup returns none
+    })
+    assert.equal(result.code, 0)
+    // Order: DeepSeek (failed) → backup (failed) → shared Fusion (success)
+    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], 'omdev/oc/deepseek-v4.1-flash-free', fusionModel])
+  } finally { f.close() }
+})
+
+test('full fallback chain WITH Copilot: Fusion fail → DeepSeek → backup', async () => {
+  // User HAS Copilot: Fusion first, then DeepSeek → backup
+  const f = await fixture(['fusion-auth', 'quota', 'success'])
+  try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    const chain = defaultModelChain(true)  // [Fusion, DeepSeek]
+    const result = await runModels({
+      ...f.options,
+      selected: chain[0],
+      models: modelCandidates(chain[0], null, chain),
+      switchProxy: null,
+      lazyProxy: async () => 'none'
+    })
+    assert.equal(result.code, 0)
+    // Order: Fusion (auth fail) → DeepSeek (quota fail) → backup (success)
+    assert.deepEqual(result.attempts.map(row => row.model), [fusionModel, preferredFreeModels[0], 'omdev/oc/deepseek-v4.1-flash-free'])
+  } finally { f.close() }
+})
+
+test('Fusion-only explicit selection never falls back to ondev backup', async () => {
+  // User explicitly selected Fusion - should ONLY try Fusion, never backup
+  const f = await fixture(['fusion-auth'])
+  try {
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.env.FUSION_ROUTE = 'own'
+    const result = await runModels({
+      ...f.options,
+      selected: fusionModel,
+      models: [fusionModel] // Fusion-only
+    })
+    assert.equal(result.code, 1)
+    assert.equal(result.attempts.length, 1, 'only tried Fusion once')
+    assert.equal(result.attempts[0].model, fusionModel)
+  } finally { f.close() }
 })
