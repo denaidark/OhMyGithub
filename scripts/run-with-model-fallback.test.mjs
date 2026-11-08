@@ -60,20 +60,94 @@ test('buildRouteSequence for DEFAULT: Fusion direct → Fusion shared', () => {
   assert.ok(!routes.some(r => r.route === RouteKind.DEEPSEEK_ONDEV))
 })
 
-test('buildRouteSequence for EXPLICIT_DEEPSEEK: WARP → ondev → direct → shared', () => {
+// ==================== WARP/skipDirectOC toggle tests (t248u) ====================
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=false, warpEnabled=false → directOC → ondev → Fusion', () => {
   const routes = buildRouteSequence({
     selectionType: SelectionType.EXPLICIT_DEEPSEEK,
     selected: deepseek,
     fusionRoute: 'own',
     backupModel: 'omdev/oc/backup',
-    hasFusionCredentials: true
+    hasFusionCredentials: true,
+    warpEnabled: false,
+    skipDirectOC: false
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_DIRECT,
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp disabled, direct OC enabled: directOC → ondev → Fusion')
+})
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=false, warpEnabled=true → directOC → WARP → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: true,
+    skipDirectOC: false
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_DIRECT,
+    RouteKind.DEEPSEEK_WARP,
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp enabled, direct OC enabled: directOC → WARP → ondev → Fusion')
+})
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=true, warpEnabled=false → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: false,
+    skipDirectOC: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp disabled, skip direct OC: straight to ondev → Fusion')
+})
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=true, warpEnabled=true → WARP → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: true,
+    skipDirectOC: true
   })
   assert.deepEqual(routes.map(r => r.route), [
     RouteKind.DEEPSEEK_WARP,
     RouteKind.DEEPSEEK_ONDEV,
     RouteKind.FUSION_DIRECT,
     RouteKind.FUSION_SHARED
-  ])
+  ], 'warp enabled, skip direct OC: WARP → ondev → Fusion')
+})
+
+test('buildRouteSequence DEFAULT: unaffected by WARP/skipDirectOC toggles', () => {
+  // DEFAULT always uses Fusion direct → shared (per owner)
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.DEFAULT,
+    selected: null,
+    fusionRoute: 'own',
+    hasFusionCredentials: true,
+    warpEnabled: true,
+    skipDirectOC: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'DEFAULT ignores WARP/skipDirectOC toggles')
 })
 
 test('buildRouteSequence for EXPLICIT_OTHER: (selected prepended by runModels) → direct → shared', () => {
@@ -196,18 +270,19 @@ test('DEFAULT selection with shared route only: Fusion shared', async () => {
 
 // ==================== EXPLICIT_DEEPSEEK Selection Tests ====================
 
-test('EXPLICIT_DEEPSEEK: DeepSeek WARP → ondev → direct Fusion → shared Fusion', async () => {
+test('EXPLICIT_DEEPSEEK: directOC → ondev → Fusion (warp disabled by default t248u)', async () => {
   const f = await fixture(['quota', 'quota', 'fusion-auth', 'success'])
   try {
     f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
     f.options.env.FUSION_ROUTE = 'own'
     f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     f.options.selected = deepseek  // Explicit DeepSeek selection
+    // Default: warpEnabled=false, skipDirectOC=false
     const result = await runModels(f.options)
     assert.equal(result.code, 0)
     assert.equal(result.selectionType, SelectionType.EXPLICIT_DEEPSEEK)
     assert.deepEqual(result.attempts.map(a => a.route), [
-      RouteKind.DEEPSEEK_WARP,
+      RouteKind.DEEPSEEK_DIRECT,
       RouteKind.DEEPSEEK_ONDEV,
       RouteKind.FUSION_DIRECT,
       RouteKind.FUSION_SHARED
@@ -215,17 +290,17 @@ test('EXPLICIT_DEEPSEEK: DeepSeek WARP → ondev → direct Fusion → shared Fu
   } finally { f.close() }
 })
 
-test('EXPLICIT_DEEPSEEK without backup: WARP → direct Fusion → shared Fusion', async () => {
+test('EXPLICIT_DEEPSEEK without backup: directOC → Fusion (warp disabled by default)', async () => {
   const f = await fixture(['quota', 'fusion-auth', 'success'])
   try {
     f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
     f.options.env.FUSION_ROUTE = 'own'
-    // No OMG_BACKUP_MODEL
+    // No OMG_BACKUP_MODEL, warpEnabled=false by default
     f.options.selected = deepseek
     const result = await runModels(f.options)
     assert.equal(result.code, 0)
     assert.deepEqual(result.attempts.map(a => a.route), [
-      RouteKind.DEEPSEEK_WARP,
+      RouteKind.DEEPSEEK_DIRECT,
       RouteKind.FUSION_DIRECT,
       RouteKind.FUSION_SHARED
     ])

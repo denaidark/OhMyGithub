@@ -17,7 +17,8 @@ export const preferredFreeModels = fullModelChain.filter(model => model !== fusi
  * Each route is a unique identity that can only be tried once per build.
  */
 export const RouteKind = Object.freeze({
-  DEEPSEEK_WARP: 'deepseek-warp',
+  DEEPSEEK_DIRECT: 'deepseek-direct',  // Direct to DeepSeek API (no proxy)
+  DEEPSEEK_WARP: 'deepseek-warp',      // Via Cloudflare WARP proxy
   DEEPSEEK_ONDEV: 'deepseek-ondev',
   FUSION_DIRECT: 'fusion-direct',
   FUSION_SHARED: 'fusion-shared'
@@ -69,12 +70,35 @@ export function determineSelectionType(selected, fusionRoute = 'none') {
  * - EXPLICIT_OTHER: (handled in runModels, selected model first) → Direct Fusion → Shared Fusion
  * - EXPLICIT_FUSION_ONLY: Fusion direct → Fusion shared (strict, no other fallback)
  */
-export function buildRouteSequence({ selectionType, selected, fusionRoute, backupModel, hasFusionCredentials }) {
+/**
+ * Build route sequence based on selection type and admin settings.
+ * 
+ * Admin toggles (t248u):
+ * - warpEnabled (default false): enable Cloudflare WARP proxy for free models
+ * - skipDirectOC (default false): skip direct OpenCode (DeepSeek) route
+ * 
+ * Route order for EXPLICIT_DEEPSEEK with toggle combinations:
+ *   skipDirectOC=false, warpEnabled=false: directOC → ondev → Fusion
+ *   skipDirectOC=false, warpEnabled=true:  directOC → WARP → ondev → Fusion
+ *   skipDirectOC=true,  warpEnabled=false: ondev → Fusion
+ *   skipDirectOC=true,  warpEnabled=true:  WARP → ondev → Fusion
+ * 
+ * DEFAULT selection always uses Fusion direct → shared (owner confirmed).
+ */
+export function buildRouteSequence({ 
+  selectionType, 
+  selected, 
+  fusionRoute, 
+  backupModel, 
+  hasFusionCredentials,
+  warpEnabled = false,
+  skipDirectOC = false
+}) {
   const routes = []
   
   switch (selectionType) {
     case SelectionType.DEFAULT:
-      // Default: Fusion first (direct → shared)
+      // Default: Fusion first (direct → shared) - NO free model fallback per owner
       if (hasFusionCredentials && fusionRoute === 'own') {
         routes.push({ model: fusionModel, route: RouteKind.FUSION_DIRECT })
       }
@@ -82,18 +106,28 @@ export function buildRouteSequence({ selectionType, selected, fusionRoute, backu
       break
       
     case SelectionType.EXPLICIT_DEEPSEEK:
-      // Explicit free model: selected model WARP → ondev → Fusion direct → Fusion shared
-      // Fix #7: Preserve exact selected model ID, don't substitute defaultFreeModel
+      // Explicit free model: route order depends on admin toggles
       const freeModel = selected || defaultFreeModel
-      routes.push({ model: freeModel, route: RouteKind.DEEPSEEK_WARP })
+      
+      // 1. Direct OC (unless skipped)
+      if (!skipDirectOC) {
+        routes.push({ model: freeModel, route: RouteKind.DEEPSEEK_DIRECT })
+      }
+      
+      // 2. WARP (only if enabled)
+      if (warpEnabled) {
+        routes.push({ model: freeModel, route: RouteKind.DEEPSEEK_WARP })
+      }
+      
+      // 3. ondev (backup model via llm.ondev.store)
       if (backupModel && /^[\w.-]+\/[\w./:-]+$/.test(backupModel)) {
         routes.push({ model: backupModel, route: RouteKind.DEEPSEEK_ONDEV })
       }
-      // Direct Fusion available if user has own credentials
+      
+      // 4. Fusion fallback
       if (hasFusionCredentials && fusionRoute === 'own') {
         routes.push({ model: fusionModel, route: RouteKind.FUSION_DIRECT })
       }
-      // Shared Fusion always available as fallback (may need on-demand acquisition)
       routes.push({ model: fusionModel, route: RouteKind.FUSION_SHARED })
       break
       

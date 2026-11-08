@@ -27,21 +27,26 @@ import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 
 // Allowed upstream hosts (no SSRF)
-const ALLOWED_UPSTREAMS = new Set([
+// Direct route: Copilot API variants
+// Shared route: OmSite proxy endpoint (configured at runtime)
+const COPILOT_UPSTREAMS = new Set([
   'api.githubcopilot.com',
   'api.individual.githubcopilot.com',
   'api.business.githubcopilot.com'
 ])
 
+// Dynamically allowed upstreams (for shared pool proxy)
+let allowedSharedUpstreams = new Set()
+
 // Allowed plugin paths
 const ALLOWED_PATHS = new Set(['/auto', '/models', '/responses', '/chat/completions'])
 
-// Headers to strip from incoming requests (plugin shouldn't control these)
+// Headers to strip from incoming requests (gateway controls these)
+// Note: copilot-session-token MUST be forwarded (plugin uses it for sessions)
 const STRIP_HEADERS = new Set([
-  'authorization',
-  'copilot-session-token',
-  'x-github-token',
-  'cookie'
+  'authorization',  // Replaced with real credential
+  'x-github-token', // Should never be exposed
+  'cookie'          // Don't forward cookies
 ])
 
 // Sensitive headers to never forward
@@ -78,31 +83,53 @@ export function createFusionGateway({
   }
   
   // Validate upstream URL
-  function validateUpstream(url) {
+  function validateUpstream(url, routeType) {
     try {
       const parsed = new URL(url)
-      if (parsed.protocol !== 'https:') return false
-      if (!ALLOWED_UPSTREAMS.has(parsed.host)) return false
-      return true
+      
+      // Allow localhost for testing (both direct and shared)
+      if (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') {
+        return true
+      }
+      
+      // Direct route requires HTTPS to Copilot
+      if (routeType === 'direct') {
+        if (parsed.protocol !== 'https:') return false
+        if (!COPILOT_UPSTREAMS.has(parsed.host)) return false
+        return true
+      }
+      // Shared route: configured proxy (HTTPS required)
+      if (routeType === 'shared') {
+        if (parsed.protocol !== 'https:') return false
+        if (!allowedSharedUpstreams.has(parsed.host)) return false
+        return true
+      }
+      return false
     } catch { return false }
   }
   
+  // Configure allowed shared upstream (called at startup)
+  function allowSharedUpstream(host) {
+    allowedSharedUpstreams.add(host)
+    log(`[fusion-gateway] Allowed shared upstream: ${host}`)
+  }
+  
   // Set route (called via control socket)
-  function setRoute({ credential, upstream, expires }) {
+  function setRoute({ credential, upstream, expires, routeType = 'direct' }) {
     if (!credential || !upstream) {
       return { success: false, error: 'Missing credential or upstream' }
     }
-    if (!validateUpstream(upstream)) {
-      return { success: false, error: 'Invalid upstream URL' }
+    if (!validateUpstream(upstream, routeType)) {
+      return { success: false, error: `Invalid upstream URL for ${routeType} route` }
     }
     if (expires && expires < now()) {
       return { success: false, error: 'Route already expired' }
     }
     
-    route = { credential, upstream, expires: expires || now() + 180000 }
+    route = { credential, upstream, expires: expires || now() + 180000, routeType }
     rotateGenerationToken()  // Clear plugin cache on route change
-    log(`[fusion-gateway] Route set: upstream=${new URL(upstream).host} expires=${new Date(route.expires).toISOString()}`)
-    return { success: true, expires: route.expires }
+    log(`[fusion-gateway] Route set: type=${routeType} upstream=${new URL(upstream).host} expires=${new Date(route.expires).toISOString()}`)
+    return { success: true, expires: route.expires, routeType }
   }
   
   // Clear route
@@ -348,7 +375,7 @@ export function createFusionGateway({
     log('[fusion-gateway] Stopped')
   }
   
-  return { start, stop, setRoute, clearRoute, getStatus, getPort: () => port }
+  return { start, stop, setRoute, clearRoute, getStatus, getPort: () => port, allowSharedUpstream }
 }
 
 // Control client helper
