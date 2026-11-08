@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤯 OMG — Oh My GitHub
+# 🤯 OMG — Oh My GitHub.
 
 ### 🚀 One Prompt In. A Full Game or App Out. 🚀
 
