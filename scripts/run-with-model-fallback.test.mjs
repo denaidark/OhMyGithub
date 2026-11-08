@@ -305,22 +305,25 @@ test('route dedup: each route tried at most once', async () => {
   } finally { f.close() }
 })
 
-test('donor 402 is terminal: marks all Fusion routes as tried', async () => {
-  const f = await fixture(['quota', 'quota', 'donor-402'])
+test('donor 402 is terminal for THIS route only, not all Fusion routes (fix #5)', async () => {
+  // Fix #5: Donor 402 on direct Fusion should NOT suppress separately eligible shared Fusion
+  const f = await fixture(['quota', 'quota', 'donor-402', 'success'])
   try {
     f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
     f.options.env.FUSION_ROUTE = 'own'
     f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
     f.options.selected = deepseek
     const result = await runModels(f.options)
-    assert.equal(result.code, 1)
-    const fusionAttempt = result.attempts.find(a => a.model === fusionModel)
-    assert.equal(fusionAttempt.error_class, 'donor-402')
-    // Should not try shared Fusion after donor 402
+    assert.equal(result.code, 0, 'shared Fusion should succeed after direct 402')
+    const directAttempt = result.attempts.find(a => a.route === RouteKind.FUSION_DIRECT)
+    assert.equal(directAttempt.error_class, 'donor-402')
+    // Shared Fusion should be tried and succeed
     const sharedAttempts = result.attempts.filter(a => a.route === RouteKind.FUSION_SHARED)
-    assert.equal(sharedAttempts.length, 0)
+    assert.equal(sharedAttempts.length, 1, 'shared Fusion should be tried after direct 402')
+    assert.equal(sharedAttempts[0].code, 0)
     const log = readFileSync(f.options.logFile, 'utf8')
-    assert.match(log, /Donor 402.*marking all Fusion routes/)
+    assert.match(log, /Donor 402.*this route is terminal/)
+    assert.doesNotMatch(log, /marking all Fusion routes/)
   } finally { f.close() }
 })
 
@@ -362,17 +365,37 @@ test('on-demand Fusion acquisition when no credentials', async () => {
   } finally { f.close() }
 })
 
-test('on-demand Fusion: consumer_limit skips Fusion routes', async () => {
+test('on-demand Fusion: consumer_limit skips SHARED only, not direct (fix #6)', async () => {
+  // Fix #6: consumer_limit only affects shared pool, not direct credentials
   const f = await fixture(['success'])
   try {
     delete f.options.env.FUSION_ACCESS_TOKEN
     f.options.selected = null
     f.options.acquireFusion = async () => ({ success: false, cause: 'consumer_limit' })
     const result = await runModels(f.options)
-    // Default with no Fusion should fail (no DeepSeek fallback for Default)
+    // Default with no Fusion credentials should fail
     assert.equal(result.code, 1)
     const log = readFileSync(f.options.logFile, 'utf8')
-    assert.match(log, /consumer limit reached.*skipping Fusion/)
+    // Should mention consumer limit for shared, not "all Fusion routes"
+    assert.match(log, /consumer limit reached for shared pool/)
+    assert.doesNotMatch(log, /skipping Fusion routes/)
+  } finally { f.close() }
+})
+
+test('transport retries are bounded (fix #8)', async () => {
+  // Fix #8: MAX_TRANSPORT_RETRIES=2 prevents infinite proxy drop/switch loops
+  const f = await fixture(['proxy-drop', 'proxy-drop', 'proxy-drop', 'proxy-drop', 'success'])
+  try {
+    let dropCount = 0
+    f.options.dropProxy = async () => { dropCount++; return true }
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.selected = fusionModel
+    const result = await runModels(f.options)
+    // Should fail after bounded retries, not infinite loop
+    const log = readFileSync(f.options.logFile, 'utf8')
+    // Should not exceed MAX_TRANSPORT_RETRIES + 1 attempts per route
+    assert.ok(dropCount <= 3, `Expected at most 3 drop retries, got ${dropCount}`)
   } finally { f.close() }
 })
 

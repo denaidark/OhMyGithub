@@ -39,21 +39,25 @@ export const SelectionType = Object.freeze({
 
 /**
  * Determine the selection type based on user's choice.
+ * Selection intent is INDEPENDENT of FUSION_ROUTE availability.
+ * Fix #7: Don't tie explicitFusionOnly to FUSION_ROUTE=own; user intent matters.
  */
 export function determineSelectionType(selected, fusionRoute = 'none') {
-  // No selection or "Default" selection → Default behavior (Fusion first)
-  if (!selected || selected === 'default' || selected === fusionModel && fusionRoute !== 'own') {
+  // No selection or "Default" label → Default behavior (Fusion first)
+  if (!selected || selected === 'default') {
     return SelectionType.DEFAULT
   }
-  // Explicit Fusion-only (user explicitly selected Fusion with own route)
-  if (selected === fusionModel && fusionRoute === 'own') {
-    return SelectionType.EXPLICIT_FUSION_ONLY
+  // Explicit Fusion selection with 'own' route → EXPLICIT_FUSION_ONLY (strict Fusion usage)
+  // Fusion selection without 'own' route → DEFAULT (will use shared pool like default)
+  if (selected === fusionModel) {
+    return fusionRoute === 'own' ? SelectionType.EXPLICIT_FUSION_ONLY : SelectionType.DEFAULT
   }
-  // Explicit DeepSeek selection
-  if (selected === defaultFreeModel || preferredFreeModels.includes(selected)) {
+  // Explicit DeepSeek or other free model selection
+  // Fix #7: Preserve exact selected model ID, don't substitute defaultFreeModel
+  if (freeEgressModel(selected)) {
     return SelectionType.EXPLICIT_DEEPSEEK
   }
-  // Explicit other model selection
+  // Explicit other model selection (paid/connected providers)
   return SelectionType.EXPLICIT_OTHER
 }
 
@@ -78,14 +82,18 @@ export function buildRouteSequence({ selectionType, selected, fusionRoute, backu
       break
       
     case SelectionType.EXPLICIT_DEEPSEEK:
-      // Explicit DeepSeek: DeepSeek WARP → ondev → Fusion direct → Fusion shared
-      routes.push({ model: defaultFreeModel, route: RouteKind.DEEPSEEK_WARP })
+      // Explicit free model: selected model WARP → ondev → Fusion direct → Fusion shared
+      // Fix #7: Preserve exact selected model ID, don't substitute defaultFreeModel
+      const freeModel = selected || defaultFreeModel
+      routes.push({ model: freeModel, route: RouteKind.DEEPSEEK_WARP })
       if (backupModel && /^[\w.-]+\/[\w./:-]+$/.test(backupModel)) {
         routes.push({ model: backupModel, route: RouteKind.DEEPSEEK_ONDEV })
       }
+      // Direct Fusion available if user has own credentials
       if (hasFusionCredentials && fusionRoute === 'own') {
         routes.push({ model: fusionModel, route: RouteKind.FUSION_DIRECT })
       }
+      // Shared Fusion always available as fallback (may need on-demand acquisition)
       routes.push({ model: fusionModel, route: RouteKind.FUSION_SHARED })
       break
       
@@ -363,15 +371,17 @@ export async function runModels({
   // Determine selection type based on user's choice
   const selectionType = determineSelectionType(selected, env.FUSION_ROUTE)
   const hasFusionCredentials = Boolean(env.FUSION_ACCESS_TOKEN)
+  const backupModel = env.OMG_BACKUP_MODEL
   
-  appendFileSync(logFile, `[model-fallback] Selection type: ${selectionType}, selected: ${selected || 'none'}, fusionRoute: ${env.FUSION_ROUTE || 'none'}\n`)
+  appendFileSync(logFile, `[model-fallback] Selection type: ${selectionType}, selected: ${selected || 'none'}, fusionRoute: ${env.FUSION_ROUTE || 'none'}, models: ${models.length}\n`)
   
-  // Build the route sequence
+  // Fix #1: Wire workflow-resolved models to route state machine
+  // Convert selection type to proper route queue with bounded semantics
   let queue = buildRouteSequence({
     selectionType,
     selected,
     fusionRoute: env.FUSION_ROUTE || 'none',
-    backupModel: env.OMG_BACKUP_MODEL,
+    backupModel,
     hasFusionCredentials
   })
   
@@ -386,6 +396,10 @@ export async function runModels({
   let switched = false, dropped = false
   let fusionAcquired = false
   let fusionEnv = { ...env }
+  
+  // Fix #8: Bound transport retries to prevent infinite loops
+  const MAX_TRANSPORT_RETRIES = 2  // Max retries per route for proxy issues
+  const transportRetries = new Map()  // route → retry count
   
   const stop = signal => { interrupted = true; child?.kill(signal) }
   const onTerm = () => stop('SIGTERM'), onInt = () => stop('SIGINT')
@@ -403,20 +417,36 @@ export async function runModels({
       }
       
       // For Fusion routes without credentials, try on-demand acquisition
-      if (model === fusionModel && !fusionEnv.FUSION_ACCESS_TOKEN && !fusionAcquired) {
-        fusionAcquired = true
-        const acquisition = await acquireFusion({ env: fusionEnv, request: fetch, logFile })
-        if (acquisition.success) {
-          fusionEnv = { ...fusionEnv, FUSION_ACCESS_TOKEN: acquisition.token, FUSION_UPSTREAM: acquisition.upstream, FUSION_ROUTE: acquisition.route }
-        } else if (acquisition.cause === 'consumer_limit') {
-          appendFileSync(logFile, '[model-fallback] On-demand Fusion: consumer limit reached, skipping Fusion routes.\n')
-          triedRoutes.add(RouteKind.FUSION_DIRECT)
-          triedRoutes.add(RouteKind.FUSION_SHARED)
-          continue
-        } else if (!fusionEnv.FUSION_ACCESS_TOKEN) {
-          appendFileSync(logFile, '[model-fallback] On-demand Fusion: unavailable, skipping Fusion route.\n')
+      // Fix #6: consumer_limit only affects SHARED route, not direct (which uses own credentials)
+      // Fix #6: Track acquisition attempts per route, not globally
+      const needsAcquisition = model === fusionModel && !fusionEnv.FUSION_ACCESS_TOKEN
+      const isSharedRoute = route === RouteKind.FUSION_SHARED
+      const isDirectRoute = route === RouteKind.FUSION_DIRECT
+      
+      if (needsAcquisition) {
+        // Direct route requires own credentials - if missing, skip (user doesn't have Copilot)
+        if (isDirectRoute) {
+          appendFileSync(logFile, '[model-fallback] Direct Fusion: no own credentials, skipping.\n')
           triedRoutes.add(route)
           continue
+        }
+        
+        // Shared route can attempt on-demand acquisition
+        if (isSharedRoute && !fusionAcquired) {
+          fusionAcquired = true  // Only attempt once per build for shared
+          const acquisition = await acquireFusion({ env: fusionEnv, request: fetch, logFile })
+          if (acquisition.success) {
+            fusionEnv = { ...fusionEnv, FUSION_ACCESS_TOKEN: acquisition.token, FUSION_UPSTREAM: acquisition.upstream, FUSION_ROUTE: acquisition.route }
+          } else if (acquisition.cause === 'consumer_limit') {
+            // consumer_limit only affects shared pool, not direct credentials
+            appendFileSync(logFile, '[model-fallback] On-demand Fusion: consumer limit reached for shared pool.\n')
+            triedRoutes.add(RouteKind.FUSION_SHARED)
+            continue
+          } else {
+            appendFileSync(logFile, `[model-fallback] On-demand Fusion: unavailable (${acquisition.cause}).\n`)
+            triedRoutes.add(route)
+            continue
+          }
         }
       }
       
@@ -448,6 +478,10 @@ export async function runModels({
       const fd = openSync(logFile, 'a')
       let failure, observedSession = false, pending = { out: '', err: '' }
       
+      // Fix #4: Track actual progress (tool events, assistant output) not just heartbeats
+      let lastProgressTime = Date.now()
+      const updateProgress = () => { lastProgressTime = Date.now() }
+      
       const inspect = (name, chunk, finish = false) => {
         pending[name] += chunk
         const lines = pending[name].split('\n'); pending[name] = finish ? '' : lines.pop()
@@ -456,6 +490,10 @@ export async function runModels({
             const row = JSON.parse(line)
             if (/^ses_[A-Za-z0-9]+$/.test(row.sessionID || '')) { sessionID = row.sessionID; observedSession = true }
             if (row.type === 'error') failure = row.error
+            // Track progress: tool calls, assistant output, step events
+            if (['tool_call', 'tool_result', 'assistant', 'step_start', 'step_end'].includes(row.type)) {
+              updateProgress()
+            }
           } catch {}
         }
         if (pending[name].length > 1024 * 1024) pending[name] = ''
@@ -467,6 +505,18 @@ export async function runModels({
           for (const [name, stream] of [['out', child.stdout], ['err', child.stderr]]) stream.on('data', chunk => { writeSync(fd, chunk); inspect(name, chunk.toString()) })
           child.on('error', () => resolve(1))
           child.on('close', (status, signal) => { inspect('out', '', true); inspect('err', '', true); resolve(signal ? 128 + (signal === 'SIGINT' ? 2 : 15) : status ?? 1) })
+          
+          // Fix #4: Implement real idle timeout with progress tracking
+          const idleCheck = setInterval(() => {
+            const idleMs = Date.now() - lastProgressTime
+            if (idleMs > idleTimeoutMs) {
+              appendFileSync(logFile, `[model-fallback] Idle timeout (${Math.round(idleMs / 1000)}s without progress); terminating.\n`)
+              child?.kill('SIGTERM')
+              clearInterval(idleCheck)
+            }
+          }, 10000)  // Check every 10s
+          idleCheck.unref?.()  // Don't keep process alive for this timer
+          child.on('close', () => clearInterval(idleCheck))
         })
       } finally { closeSync(fd); child = null }
       
@@ -504,45 +554,60 @@ export async function runModels({
       
       if (code !== 0 && model === fusionModel && failure) appendFileSync(logFile, fusionFailureLine(failure, env))
       
-      // Donor 402 is terminal for all Fusion routes
+      // Fix #5: Donor 402 is terminal for THIS route only, not all Fusion routes.
+      // Direct Fusion failure should not suppress separately eligible shared Fusion.
+      // Route was already marked tried above; just log the terminal status.
       if (errorClass === 'donor-402' && model === fusionModel) {
-        appendFileSync(logFile, '[model-fallback] Donor 402 Payment Required; marking all Fusion routes as tried.\n')
-        triedRoutes.add(RouteKind.FUSION_DIRECT)
-        triedRoutes.add(RouteKind.FUSION_SHARED)
+        appendFileSync(logFile, `[model-fallback] Donor 402 Payment Required on route ${route}; this route is terminal.\n`)
+        // Don't mark other routes - shared may have different donor/capacity
       }
       
       // Proxy tunnel error handling
+      // Fix #8: Bound transport retries to prevent infinite loops
       if (code !== 0 && !interrupted && !dropped && proxyTunnelError(failure)) {
-        dropped = true; switched = true
-        const drop = dropProxy === undefined ? proxyDrop({ env, binary, logFile }) : dropProxy
-        appendFileSync(logFile, '[model-fallback] The proxy refused to open tunnels; restarting OpenCode without it.\n')
-        const ok = drop ? await drop().catch(() => false) : false
-        attempts.at(-1).proxy_drop = ok ? 'ok' : 'failed'
-        writeFileSync(join(directory, 'model-attempts.json'), JSON.stringify(attempts))
-        if (ok) { 
-          appendFileSync(logFile, `[model-fallback] Proxy dropped; retrying ${model}.\n`)
-          triedRoutes.delete(route)
-          index--
-          continue 
+        const retryCount = transportRetries.get(route) || 0
+        if (retryCount < MAX_TRANSPORT_RETRIES) {
+          dropped = true; switched = true
+          const drop = dropProxy === undefined ? proxyDrop({ env, binary, logFile }) : dropProxy
+          appendFileSync(logFile, '[model-fallback] The proxy refused to open tunnels; restarting OpenCode without it.\n')
+          const ok = drop ? await drop().catch(() => false) : false
+          attempts.at(-1).proxy_drop = ok ? 'ok' : 'failed'
+          writeFileSync(join(directory, 'model-attempts.json'), JSON.stringify(attempts))
+          if (ok) { 
+            transportRetries.set(route, retryCount + 1)
+            appendFileSync(logFile, `[model-fallback] Proxy dropped; retrying ${model} (attempt ${retryCount + 2}/${MAX_TRANSPORT_RETRIES + 1}).\n`)
+            triedRoutes.delete(route)
+            index--
+            continue 
+          }
+        } else {
+          appendFileSync(logFile, `[model-fallback] Proxy retry limit reached for route ${route}.\n`)
         }
       }
       
       if (code === 0 || interrupted || !retryable) break
       
       // Runtime proxy switch for free model free-limit
+      // Fix #8: Bound proxy switch retries
       if (!switched && switchProxy && freeEgressModel(model) && errorClass === 'free-limit') {
-        switched = true
-        appendFileSync(logFile, '[model-fallback] Free usage limit on the WARP exit; switching OpenCode to the DataImpulse proxy.\n')
-        const ok = await switchProxy().catch(() => false)
-        attempts.at(-1).proxy_switch = ok ? 'ok' : 'failed'
-        writeFileSync(join(directory, 'model-attempts.json'), JSON.stringify(attempts))
-        if (ok) { 
-          appendFileSync(logFile, `[model-fallback] DataImpulse proxy ready; retrying ${model}.\n`)
-          triedRoutes.delete(route)
-          index--
-          continue 
+        const retryCount = transportRetries.get(route) || 0
+        if (retryCount < MAX_TRANSPORT_RETRIES) {
+          switched = true
+          appendFileSync(logFile, '[model-fallback] Free usage limit on the WARP exit; switching OpenCode to the DataImpulse proxy.\n')
+          const ok = await switchProxy().catch(() => false)
+          attempts.at(-1).proxy_switch = ok ? 'ok' : 'failed'
+          writeFileSync(join(directory, 'model-attempts.json'), JSON.stringify(attempts))
+          if (ok) { 
+            transportRetries.set(route, retryCount + 1)
+            appendFileSync(logFile, `[model-fallback] DataImpulse proxy ready; retrying ${model} (attempt ${retryCount + 2}/${MAX_TRANSPORT_RETRIES + 1}).\n`)
+            triedRoutes.delete(route)
+            index--
+            continue 
+          }
+          appendFileSync(logFile, '[model-fallback] DataImpulse proxy unavailable; keeping the current network.\n')
+        } else {
+          appendFileSync(logFile, `[model-fallback] Proxy switch retry limit reached for route ${route}.\n`)
         }
-        appendFileSync(logFile, '[model-fallback] DataImpulse proxy unavailable; keeping the current network.\n')
       }
       
       if (index < queue.length - 1) appendFileSync(logFile, '[model-fallback] Provider/model unavailable; advancing to the next candidate in the same session.\n')
