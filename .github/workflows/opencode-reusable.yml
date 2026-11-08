@@ -603,7 +603,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/frp-cache
-          key: frp-0.71.1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/scripts/download-frp.sh') }}
+          key: frp-0.71.1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runtime_ref }}
 
       - name: Start OpenCode web UI and Cloudflare tunnel
         id: opencode_web
