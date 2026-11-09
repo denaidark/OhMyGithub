@@ -28,49 +28,9 @@ export async function fetchRoutingSettings({ origin = 'https://omgithub.com', ti
 export function resolveRouting({ userWarpRequested, adminSettings, fusionEnabled, labels = [] }) {
   const { enable_warp, skip_direct_opencode } = adminSettings
   const picked = labels.some(name => String(name).startsWith('model/'))
-  
-  // Fusion skips WARP for Default (no model/* label) when Fusion plugin is on
-  if (!picked && fusionEnabled && !enable_warp) {
-    return { warp: 'skip', skipDirect: false }
-  }
-  
-  // Admin skip_direct_opencode forces proxy-only (no direct calls)
-  if (skip_direct_opencode) {
-    // Both on: WARP → ondev
-    // Skip on, WARP off: ondev only
-    return {
-      warp: (enable_warp || userWarpRequested) ? 'on' : 'off',
-      skipDirect: true
-    }
-  }
-  
-  // Admin enable_warp OR per-user warp request enables WARP
-  const warpEnabled = enable_warp || userWarpRequested
-  return {
-    warp: warpEnabled ? 'on' : 'off',
-    skipDirect: false
-  }
-}
-
-import { pathToFileURL } from 'node:url'
-import { appendFileSync } from 'node:fs'
-
-if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
-  const origin = process.env.OMGITHUB_ORIGIN || 'https://omgithub.com'
-  const userWarpRequested = process.argv[2] === 'true'
-  const fusionEnabled = process.argv[3] === 'true'
-  const labelsJson = process.argv[4] || '[]'
-  let labels = []
-  try { labels = JSON.parse(labelsJson).map(l => typeof l === 'string' ? l : l?.name).filter(Boolean) } catch {}
-  
-  const settings = await fetchRoutingSettings({ origin })
-  const result = resolveRouting({ userWarpRequested, adminSettings: settings, fusionEnabled, labels })
-  
-  // Export SKIP_DIRECT_OC to GITHUB_ENV if set
-  if (result.skipDirect && process.env.GITHUB_ENV) {
-    appendFileSync(process.env.GITHUB_ENV, 'SKIP_DIRECT_OC=1\n')
-  }
-  
-  // Output WARP decision for workflow (on, off, or skip)
-  console.log(result.warp)
+  const requested = Boolean(userWarpRequested || enable_warp)
+  // Same order as the old warp-decision.mjs: not requested -> off; Default with Fusion -> skip (lazy); else on.
+  const warp = !requested ? 'off' : (!picked && fusionEnabled ? 'skip' : 'on')
+  // Skip direct OpenCode only matters when WARP is not carrying free models: then free calls go to ondev (backup endpoint).
+  return { warp, skipDirect: Boolean(skip_direct_opencode) && warp === 'off' }
 }

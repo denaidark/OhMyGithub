@@ -729,7 +729,7 @@ jobs:
           # Still set up WARP/DataImpulse when the phone is up — models.opencode.ai needs that path.
           fusion_on=false
           [[ "${plugin_commit:-}" =~ ^[a-f0-9]{40}$ ]] && fusion_on=true
-          WARP_DECISION="$(node "$RUNTIME_DIR/scripts/fetch-routing-settings.mjs" "$WARP_REQUEST" "$fusion_on" "$LABELS_JSON" 2>/dev/null || echo off)"
+          WARP_DECISION="$(node "$RUNTIME_DIR/scripts/warp-decision.mjs" "$WARP_REQUEST" "$fusion_on" "$LABELS_JSON" 2>/dev/null || echo off)"
           echo "WARP decision: $WARP_DECISION (requested=$WARP_REQUEST, fusion=$fusion_on)"
           if [[ "$WARP_DECISION" == 'skip' ]]; then
             echo "- WARP: skipped for Default because Fusion runs first (set up lazily before a free model)" >> "$GITHUB_STEP_SUMMARY"

@@ -117,7 +117,8 @@ test('resolveRouting: both on = WARP then ondev', () => {
     fusionEnabled: false,
     labels: []
   })
-  assert.deepEqual(result, { warp: 'on', skipDirect: true })
+  // Free models ride WARP (not direct), then the ondev backup endpoint
+  assert.deepEqual(result, { warp: 'on', skipDirect: false })
 })
 
 test('resolveRouting: skip on with user WARP = WARP then ondev', () => {
@@ -127,7 +128,7 @@ test('resolveRouting: skip on with user WARP = WARP then ondev', () => {
     fusionEnabled: false,
     labels: []
   })
-  assert.deepEqual(result, { warp: 'on', skipDirect: true })
+  assert.deepEqual(result, { warp: 'on', skipDirect: false })
 })
 
 test('resolveRouting: Fusion skip preserved for Default without admin WARP', () => {
@@ -140,14 +141,23 @@ test('resolveRouting: Fusion skip preserved for Default without admin WARP', () 
   assert.deepEqual(result, { warp: 'skip', skipDirect: false })
 })
 
-test('resolveRouting: admin WARP overrides Fusion skip', () => {
+test('resolveRouting: admin WARP keeps the lazy Fusion skip for Default', () => {
   const result = resolveRouting({
     userWarpRequested: false,
     adminSettings: { enable_warp: true, skip_direct_opencode: false },
     fusionEnabled: true,
     labels: []
   })
-  assert.deepEqual(result, { warp: 'on', skipDirect: false })
+  assert.deepEqual(result, { warp: 'skip', skipDirect: false })
+})
+
+test('resolveRouting: WARP off and Fusion Default stays off, exactly like warp-decision', async () => {
+  const { warpDecision } = await import('./warp-decision.mjs')
+  for (const requested of [false, true]) for (const fusionEnabled of [false, true]) for (const labels of [[], ['model/openai/gpt-6-luna']]) {
+    const result = resolveRouting({ userWarpRequested: requested, adminSettings: { enable_warp: false, skip_direct_opencode: false }, fusionEnabled, labels })
+    assert.equal(result.warp, warpDecision({ requested, fusionEnabled, labels }))
+    assert.equal(result.skipDirect, false)
+  }
 })
 
 test('resolveRouting: picked model with Fusion does not skip WARP', () => {

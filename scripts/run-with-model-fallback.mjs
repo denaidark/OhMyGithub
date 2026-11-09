@@ -146,7 +146,9 @@ export function appendBackupModel(candidates, env = process.env) {
  */
 export function applySkipDirectRouting(candidates, env = process.env) {
   if (env.SKIP_DIRECT_OC !== '1') return candidates
-  // Keep only non-free models (backup, selected paid providers) and Fusion
+  const backup = String(env.OMG_BACKUP_MODEL || '').trim()
+  // Without the ondev backup endpoint configured, skipping would leave nothing but Fusion; keep today's chain.
+  if (!backup || !candidates.includes(backup)) return candidates
   return candidates.filter(model => !freeEgressModel(model))
 }
 // Runtime egress switch: when WARP passed its startup probe (WARP_RUNTIME_SWITCH=1) but a free

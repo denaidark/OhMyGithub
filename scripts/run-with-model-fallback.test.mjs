@@ -273,17 +273,17 @@ test('applySkipDirectRouting does nothing when SKIP_DIRECT_OC is not set', () =>
 
 test('applySkipDirectRouting removes free models when SKIP_DIRECT_OC=1', () => {
   const chain = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'omdev/backup', fusionModel]
-  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), ['omdev/backup', fusionModel])
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1', OMG_BACKUP_MODEL: 'omdev/backup' }), ['omdev/backup', fusionModel])
 })
 
 test('applySkipDirectRouting keeps Fusion and non-free models', () => {
-  const chain = ['openai/gpt-6-astra', 'opencode/deepseek-v4.1-flash-free', fusionModel]
-  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), ['openai/gpt-6-astra', fusionModel])
+  const chain = ['openai/gpt-6-astra', 'opencode/deepseek-v4.1-flash-free', 'omdev/backup', fusionModel]
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1', OMG_BACKUP_MODEL: 'omdev/backup' }), ['openai/gpt-6-astra', 'omdev/backup', fusionModel])
 })
 
-test('applySkipDirectRouting with only free models returns empty (backup should be present)', () => {
+test('applySkipDirectRouting keeps the chain when no ondev backup endpoint is configured', () => {
   const chain = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free']
-  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), [])
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), chain)
 })
 
 test('SKIP_DIRECT_OC route order: both off = all models', () => {
@@ -294,6 +294,6 @@ test('SKIP_DIRECT_OC route order: both off = all models', () => {
 
 test('SKIP_DIRECT_OC route order: skip on = backup and Fusion only', () => {
   const chain = ['opencode/deepseek-v4.1-flash-free', 'omdev/backup', fusionModel]
-  const result = applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' })
+  const result = applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1', OMG_BACKUP_MODEL: 'omdev/backup' })
   assert.deepEqual(result, ['omdev/backup', fusionModel])
 })
