@@ -1,5 +1,7 @@
 import { createV2Client, finishedV2Message } from './opencode-v2-api.mjs'
 import { createOpenCodeClient, createSessionController, SessionEventTypes, TERMINAL_EVENTS } from './opencode-api.mjs'
+import { createLeaseClient } from './fusion-lease-client.mjs'
+import { createGatewayControl } from './gateway-control.mjs'
 import { collectSessionStats, finishStats } from './opencode-stats.mjs'
 import { spawn } from 'node:child_process'
 import { appendFileSync, openSync, writeSync, closeSync, readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
@@ -753,6 +755,34 @@ export async function runModels({
     httpClient = createOpenCodeClient({ base: `http://127.0.0.1:${port}`, password: env.OPENCODE_PASSWORD })
   }
   
+  // P0-1: Create lease client for dedicated lease API (replaces acquireFusionOnDemand)
+  // Only when gateway is available (indicated by FUSION_CONTROL_SOCKET)
+  const gatewaySocketPath = env.FUSION_CONTROL_SOCKET
+  let leaseClient = null
+  let gatewayControl = null
+  
+  if (gatewaySocketPath && env.OMGITHUB_CALLBACK_TOKEN) {
+    const origin = env.OMGITHUB_ORIGIN || 'https://omgithub.com'
+    const repo = env.GITHUB_REPOSITORY
+    const issueNumber = env.TRIGGER_ISSUE_NUMBER
+    
+    if (repo && issueNumber) {
+      leaseClient = createLeaseClient({
+        origin,
+        callbackToken: env.OMGITHUB_CALLBACK_TOKEN,
+        repo,
+        issueNumber,
+        runId,
+        runAttempt: Number(runAttempt),
+        logFile,
+        request: fetch
+      })
+      
+      gatewayControl = createGatewayControl({ socketPath: gatewaySocketPath, logFile })
+      appendFileSync(logFile, `[model-fallback] Lease client and gateway control initialized\n`)
+    }
+  }
+  
   // Generate session ID if none exists
   // Session format: ses_<24-char-hex> (deterministic from run/attempt for restart)
   if (!sessionID) {
@@ -830,39 +860,130 @@ export async function runModels({
       const isDirectRoute = route === RouteKind.FUSION_DIRECT
       
       if (needsAcquisition) {
-        // Direct route requires own credentials - if missing, skip (user doesn't have Copilot)
+        // Direct route: try to acquire via lease API (validates Copilot access)
         if (isDirectRoute) {
-          appendFileSync(logFile, '[model-fallback] Direct Fusion: no own credentials, skipping.\n')
-          triedRoutes.add(route)
-          continue
-        }
-        
-        // Shared route can attempt on-demand acquisition
-        // Supports bounded retry with different donor on 402
-        if (isSharedRoute) {
-          const acquisition = await acquireFusion({ 
-            env: fusionEnv, 
-            request: fetch, 
-            logFile,
-            excludeDonor: lastDonorToken  // Request different donor on retry
-          })
-          if (acquisition.success) {
-            fusionEnv = { ...fusionEnv, FUSION_ACCESS_TOKEN: acquisition.token, FUSION_UPSTREAM: acquisition.upstream, FUSION_ROUTE: acquisition.route }
-            lastDonorToken = acquisition.token  // Track for potential retry
-            fusionAcquired = true
-          } else if (acquisition.cause === 'consumer_limit') {
-            // consumer_limit only affects shared pool, not direct credentials
-            appendFileSync(logFile, '[model-fallback] On-demand Fusion: consumer limit reached for shared pool.\n')
-            triedRoutes.add(RouteKind.FUSION_SHARED)
-            continue
-          } else if (acquisition.cause === 'no_donors') {
-            appendFileSync(logFile, '[model-fallback] On-demand Fusion: no donors available in pool.\n')
-            triedRoutes.add(RouteKind.FUSION_SHARED)
-            continue
+          if (leaseClient && gatewayControl) {
+            // User's own token is needed for direct route
+            const ownToken = env.GITHUB_TOKEN || env.GH_TOKEN
+            if (!ownToken) {
+              appendFileSync(logFile, '[model-fallback] Direct Fusion: no own token available.\n')
+              triedRoutes.add(route)
+              continue
+            }
+            
+            const leaseResult = await leaseClient.acquireDirect(ownToken)
+            
+            if (leaseResult.success && leaseResult.lease) {
+              // Set gateway route with user's own token
+              const routeResult = await gatewayControl.setRoute({
+                credential: leaseResult.lease.token,  // User's own token
+                upstream: leaseResult.lease.upstream,
+                expires: leaseResult.lease.expires,
+                routeType: 'direct'
+              })
+              
+              if (routeResult.success) {
+                fusionEnv = {
+                  ...fusionEnv,
+                  FUSION_ACCESS_TOKEN: '', // Gateway injects credential
+                  FUSION_UPSTREAM: env.FUSION_UPSTREAM || `http://127.0.0.1:${env.FUSION_GATEWAY_PORT}`,
+                  FUSION_ROUTE: 'direct'
+                }
+                fusionAcquired = true
+                appendFileSync(logFile, '[model-fallback] Direct lease acquired via dedicated API\n')
+              } else {
+                appendFileSync(logFile, `[model-fallback] Direct gateway route failed: ${routeResult.error}\n`)
+                triedRoutes.add(route)
+                continue
+              }
+            } else {
+              appendFileSync(logFile, `[model-fallback] Direct lease denied: ${leaseResult.error}\n`)
+              triedRoutes.add(route)
+              continue
+            }
           } else {
-            appendFileSync(logFile, `[model-fallback] On-demand Fusion: unavailable (${acquisition.cause}).\n`)
+            // Legacy: no gateway, can't do direct without raw credentials
+            appendFileSync(logFile, '[model-fallback] Direct Fusion: no gateway, no own credentials, skipping.\n')
             triedRoutes.add(route)
             continue
+          }
+        }
+        
+        // P0-1: Use lease client + gateway control when available (dedicated API)
+        // Falls back to old acquireFusionOnDemand when gateway not available
+        if (isSharedRoute) {
+          if (leaseClient && gatewayControl) {
+            // NEW PATH: dedicated lease API + gateway route control
+            const leaseResult = await leaseClient.acquireShared({
+              excludeLeaseId: lastDonorToken  // Track lease ID for retry
+            })
+            
+            if (leaseResult.success && leaseResult.lease) {
+              // Set gateway route via control socket
+              const routeResult = await gatewayControl.setRoute({
+                credential: leaseResult.lease.token,
+                upstream: leaseResult.lease.upstream,
+                expires: leaseResult.lease.expires,
+                routeType: 'shared'
+              })
+              
+              if (routeResult.success) {
+                // Gateway handles credential injection; env uses gateway upstream
+                fusionEnv = { 
+                  ...fusionEnv, 
+                  FUSION_ACCESS_TOKEN: '', // Clear raw token - gateway injects
+                  FUSION_UPSTREAM: env.FUSION_UPSTREAM || `http://127.0.0.1:${env.FUSION_GATEWAY_PORT}`,
+                  FUSION_ROUTE: 'shared'
+                }
+                lastDonorToken = leaseResult.lease.leaseId  // Track for potential retry
+                fusionAcquired = true
+                appendFileSync(logFile, `[model-fallback] Shared lease acquired via dedicated API (leaseId=${leaseResult.lease.leaseId})\n`)
+              } else {
+                appendFileSync(logFile, `[model-fallback] Gateway route set failed: ${routeResult.error}\n`)
+                triedRoutes.add(route)
+                continue
+              }
+            } else {
+              const cause = leaseResult.error || 'unknown'
+              if (cause === 'consumer_limit' || leaseResult.status === 429) {
+                appendFileSync(logFile, '[model-fallback] Shared lease: consumer limit reached.\n')
+                triedRoutes.add(RouteKind.FUSION_SHARED)
+                continue
+              } else if (cause === 'pool_busy' || leaseResult.status === 503) {
+                appendFileSync(logFile, '[model-fallback] Shared lease: pool unavailable.\n')
+                triedRoutes.add(RouteKind.FUSION_SHARED)
+                continue
+              } else {
+                appendFileSync(logFile, `[model-fallback] Shared lease: unavailable (${cause}).\n`)
+                triedRoutes.add(route)
+                continue
+              }
+            }
+          } else {
+            // LEGACY PATH: old acquireFusionOnDemand when no gateway
+            const acquisition = await acquireFusion({ 
+              env: fusionEnv, 
+              request: fetch, 
+              logFile,
+              excludeDonor: lastDonorToken  // Request different donor on retry
+            })
+            if (acquisition.success) {
+              fusionEnv = { ...fusionEnv, FUSION_ACCESS_TOKEN: acquisition.token, FUSION_UPSTREAM: acquisition.upstream, FUSION_ROUTE: acquisition.route }
+              lastDonorToken = acquisition.token  // Track for potential retry
+              fusionAcquired = true
+            } else if (acquisition.cause === 'consumer_limit') {
+              appendFileSync(logFile, '[model-fallback] On-demand Fusion: consumer limit reached for shared pool.\n')
+              triedRoutes.add(RouteKind.FUSION_SHARED)
+              continue
+            } else if (acquisition.cause === 'no_donors') {
+              appendFileSync(logFile, '[model-fallback] On-demand Fusion: no donors available in pool.\n')
+              triedRoutes.add(RouteKind.FUSION_SHARED)
+              continue
+            } else {
+              appendFileSync(logFile, `[model-fallback] On-demand Fusion: unavailable (${acquisition.cause}).\n`)
+              triedRoutes.add(route)
+              continue
+            }
           }
         }
       }

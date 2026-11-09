@@ -59,6 +59,15 @@ export const TOOL_EVENTS = new Set([
 export function createOpenCodeClient({ base, password, request = fetch, now = Date.now }) {
   const auth = 'Basic ' + Buffer.from(`opencode:${password}`).toString('base64')
   
+  /**
+   * Make API request and return consistent response format.
+   * 
+   * P0-5: HTTP 2xx = success, returns { ok: true, status, data }
+   * HTTP 4xx/5xx = failure, returns { ok: false, status, error }
+   * 
+   * This ensures callers can check response.ok consistently,
+   * whether the API returns 200 JSON, 204 No Content, or error.
+   */
   async function api(path, options = {}) {
     const url = `${base}${path}`
     const headers = {
@@ -73,18 +82,31 @@ export function createOpenCodeClient({ base, password, request = fetch, now = Da
       body: options.body ? JSON.stringify(options.body) : undefined
     })
     
-    if (!response.ok) {
-      const error = new Error(`OpenCode API error: ${response.status}`)
-      error.status = response.status
-      try { error.body = await response.json() } catch {}
-      throw error
+    // P0-5: HTTP status determines success, not body content
+    if (response.ok) {
+      // 2xx success
+      const contentType = response.headers.get('content-type') || ''
+      let data = null
+      if (contentType.includes('application/json')) {
+        try { data = await response.json() } catch {}
+      } else if (response.status !== 204) {
+        try { data = await response.text() } catch {}
+      }
+      return { ok: true, status: response.status, data }
     }
     
-    const contentType = response.headers.get('content-type') || ''
-    if (contentType.includes('application/json')) {
-      return response.json()
-    }
-    return response.text()
+    // 4xx/5xx failure
+    let error = null
+    try {
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        error = await response.json()
+      } else {
+        error = await response.text()
+      }
+    } catch {}
+    
+    return { ok: false, status: response.status, error }
   }
   
   // POST /api/session/:id/model - set model for subsequent turns

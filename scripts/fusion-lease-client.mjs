@@ -50,11 +50,20 @@ export function createLeaseClient({
   /**
    * Acquire a direct route lease.
    * Validates that the run's owner has Copilot access.
+   * Direct route: run uses its OWN token, not a pool credential.
    * 
-   * @returns {{ success: boolean, lease?: { token, upstream, expires }, error?: string }}
+   * Server response: { success, route: 'direct', scope, expires_in_ms, upstream }
+   * 
+   * @param {string} ownToken - The run owner's GitHub token for direct route
+   * @returns {{ success: boolean, lease?: { token, upstream, expires, route }, error?: string }}
    */
-  async function acquireDirect() {
+  async function acquireDirect(ownToken) {
     log('[lease-client] Acquiring direct lease...')
+    
+    if (!ownToken) {
+      log('[lease-client] Direct lease requires own token')
+      return { success: false, error: 'no_own_token' }
+    }
     
     try {
       const response = await request(`${baseUrl}/fusion/lease/direct`, {
@@ -77,21 +86,23 @@ export function createLeaseClient({
       }
       
       const data = await response.json()
-      if (data.lease) {
+      // Server returns: { success, route: 'direct', scope, expires_in_ms, upstream }
+      // Direct route uses run's OWN token, not a pool credential
+      if (data.success) {
         activeLease = {
-          type: 'direct',
-          token: data.lease.token,
-          upstream: data.lease.upstream,
-          expires: data.lease.expires,
-          leaseId: data.lease.id
+          route: 'direct',
+          token: ownToken,  // Use run's own token
+          upstream: data.upstream,
+          expires: now() + (data.expires_in_ms || 180000),
+          scope: data.scope
         }
         log(`[lease-client] Direct lease acquired (expires=${new Date(activeLease.expires).toISOString()})`)
         scheduleRenewal()
         return { success: true, lease: activeLease }
       }
       
-      log(`[lease-client] Direct lease denied: ${data.error || 'unknown'}`)
-      return { success: false, error: data.error || 'denied' }
+      log(`[lease-client] Direct lease denied: ${data.cause || data.error || 'unknown'}`)
+      return { success: false, error: data.cause || data.error || 'denied' }
     } catch (error) {
       log(`[lease-client] Direct lease error: ${error.message}`)
       return { success: false, error: 'request_error', message: error.message }
@@ -101,21 +112,24 @@ export function createLeaseClient({
   /**
    * Acquire a shared route lease from the donor pool.
    * 
+   * Server response: { success, route: 'shared', scope, credential, lease_id, expires_in_ms, upstream }
+   * 
    * @param {Object} options
-   * @param {string} [options.excludeDonor] - Donor token to exclude (for 402 retry)
-   * @returns {{ success: boolean, lease?: { token, upstream, expires }, error?: string }}
+   * @param {string} [options.excludeLeaseId] - Lease ID to exclude (for 402 retry)
+   * @returns {{ success: boolean, lease?: { token, upstream, expires, route, leaseId }, error?: string }}
    */
-  async function acquireShared({ excludeDonor } = {}) {
-    log(`[lease-client] Acquiring shared lease${excludeDonor ? ' (excluding previous donor)' : ''}...`)
+  async function acquireShared({ excludeLeaseId } = {}) {
+    log(`[lease-client] Acquiring shared lease${excludeLeaseId ? ' (excluding previous lease)' : ''}...`)
     
     const body = {
       run: runId,
       attempt: runAttempt
     }
     
-    // Request different donor on retry
-    if (excludeDonor) {
-      body.exclude_donor_hash = createHash('sha256').update(excludeDonor).digest('hex').slice(0, 16)
+    // Server doesn't support exclude_donor_hash yet - will be added
+    // For now, just log the exclusion request
+    if (excludeLeaseId) {
+      log(`[lease-client] Excluding previous lease: ${excludeLeaseId}`)
     }
     
     try {
@@ -136,22 +150,23 @@ export function createLeaseClient({
       }
       
       const data = await response.json()
-      if (data.lease) {
+      // Server returns: { success, route: 'shared', scope, credential, lease_id, expires_in_ms, upstream }
+      if (data.success && data.credential) {
         activeLease = {
-          type: 'shared',
-          token: data.lease.token,
-          upstream: data.lease.upstream,
-          expires: data.lease.expires,
-          leaseId: data.lease.id,
-          donorId: data.lease.donor_id
+          route: 'shared',
+          token: data.credential,  // Server returns 'credential' not 'lease.token'
+          upstream: data.upstream,
+          expires: now() + (data.expires_in_ms || 180000),
+          leaseId: data.lease_id,
+          scope: data.scope
         }
-        log(`[lease-client] Shared lease acquired (expires=${new Date(activeLease.expires).toISOString()})`)
+        log(`[lease-client] Shared lease acquired (leaseId=${data.lease_id}, expires=${new Date(activeLease.expires).toISOString()})`)
         scheduleRenewal()
         return { success: true, lease: activeLease }
       }
       
-      log(`[lease-client] Shared lease denied: ${data.error || 'unknown'}`)
-      return { success: false, error: data.error || 'denied' }
+      log(`[lease-client] Shared lease denied: ${data.cause || data.error || 'unknown'}`)
+      return { success: false, error: data.cause || data.error || 'denied' }
     } catch (error) {
       log(`[lease-client] Shared lease error: ${error.message}`)
       return { success: false, error: 'request_error', message: error.message }
