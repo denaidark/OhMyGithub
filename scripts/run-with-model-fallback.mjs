@@ -23,14 +23,20 @@ export function modelCandidates(selected, live = null, chain = defaultModelChain
 }
 // Admin force mode is an explicit test contract, not a normal user model preference.
 // Continuations copy model/* labels, so both label resolution and execution enforce it.
-export function resolveRunModels({ selected, live = null, fusionEnabled = false, requireShared = false, forceSharedTest = false, route = 'none' }) {
+// adminChain (ordered model ids from the site's admin settings) replaces the default order for Default builds.
+// Fusion keeps its leading slot when enabled; requireShared and route handling are unchanged.
+export function adminModelChain(adminChain, fusionEnabled = false) {
+  const free = Array.isArray(adminChain) ? adminChain.filter(id => typeof id === 'string' && id && id !== fusionModel) : []
+  return free.length ? [...(fusionEnabled ? [fusionModel] : []), ...new Set(free)] : null
+}
+export function resolveRunModels({ selected, live = null, fusionEnabled = false, requireShared = false, forceSharedTest = false, route = 'none', adminChain = null }) {
   if (requireShared) {
     if (!fusionEnabled) throw new Error('Required shared Fusion plugin unavailable; refusing free-model fallback')
     // Preserve an explicit connected paid-provider choice outside admin test mode.
     if (selected && selected !== fusionModel && !freeEgressModel(selected) && !forceSharedTest) return { model: selected, models: [selected, fusionModel] }
     return { model: fusionModel, models: [fusionModel] }
   }
-  const chain = defaultModelChain(fusionEnabled)
+  const chain = (!selected && adminModelChain(adminChain, fusionEnabled)) || defaultModelChain(fusionEnabled)
   const fallback = chain.find(id => !live || !id.startsWith('opencode/') || live.includes(id)) || chain[0]
   const usable = id => !live || !id.startsWith('opencode/') || !id.endsWith('-free') || live.includes(id)
   const model = selected && usable(selected) ? selected : fallback

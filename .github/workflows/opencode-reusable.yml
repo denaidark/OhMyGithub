@@ -907,7 +907,7 @@ jobs:
             }
             const { parseIssueRequest } = await import(`${process.env.RUNTIME_DIR}/scripts/issue-request.mjs`);
             const { modelChain: adminChain } = parseIssueRequest(issueResponse.data);
-            const { resolveRunModels, fusionModel, preferredFreeModels } = await import(`${process.env.RUNTIME_DIR}/scripts/run-with-model-fallback.mjs`);
+            const { resolveRunModels } = await import(`${process.env.RUNTIME_DIR}/scripts/run-with-model-fallback.mjs`);
             const fusionEnabled = /^[a-f0-9]{40}$/.test(String(process.env.FUSION_PLUGIN_COMMIT || ''));
             let live = null;
             try {
@@ -918,22 +918,8 @@ jobs:
             } catch (error) { core.warning(`OpenCode model catalog unavailable: ${error.message}`); }
             const requireShared = process.env.FUSION_REQUIRE_SHARED === 'true';
             const selected = modelLabels[0]?.slice('model/'.length);
-            let model, models;
-            if (adminChain && adminChain.length > 0 && !selected) {
-              const liveSet = live ? new Set(live) : null;
-              const validChain = adminChain.filter(id => !liveSet || !preferredFreeModels.includes(id) || liveSet.has(id));
-              if (validChain.length > 0) {
-                if (fusionEnabled && validChain[0] !== fusionModel) validChain.unshift(fusionModel);
-                model = validChain[0];
-                models = validChain;
-                core.info(`Using admin model chain: ${validChain.join(' → ')}`);
-              } else {
-                core.warning('Admin model chain had no valid entries; falling back to default chain.');
-                ({ model, models } = resolveRunModels({ selected, live, fusionEnabled, requireShared, forceSharedTest: process.env.FUSION_FORCE_SHARED_TEST === 'true', route: process.env.FUSION_ROUTE }));
-              }
-            } else {
-              ({ model, models } = resolveRunModels({ selected, live, fusionEnabled, requireShared, forceSharedTest: process.env.FUSION_FORCE_SHARED_TEST === 'true', route: process.env.FUSION_ROUTE }));
-            }
+            const { model, models } = resolveRunModels({ selected, live, fusionEnabled, requireShared, forceSharedTest: process.env.FUSION_FORCE_SHARED_TEST === 'true', route: process.env.FUSION_ROUTE, adminChain: selected ? null : adminChain });
+            if (!selected && adminChain?.length && !requireShared) core.info(`Admin model chain requested: ${adminChain.join(' -> ')}; running ${models.join(' -> ')}`);
             if (requireShared) core.info('Shared Fusion checkout overrides inherited model labels; primary cannot fall back to a free provider.');
             const skills = names.filter((name) => name.startsWith('skill/'))
               .map((name) => name.slice('skill/'.length)).sort();

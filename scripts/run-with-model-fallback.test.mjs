@@ -249,3 +249,17 @@ test('normal shared and own Fusion primaries cannot silently fall through after 
 test('normal shared fixes free-first labels without overriding explicit connected providers; admin force overrides both',()=>{
  assert.deepEqual(resolveRunModels({selected:'openai/gpt-6-astra',fusionEnabled:true,requireShared:true}).models,['openai/gpt-6-astra',fusionModel]);assert.deepEqual(resolveRunModels({selected:'openai/gpt-6-astra',fusionEnabled:true,requireShared:true,forceSharedTest:true}).models,[fusionModel])
 })
+
+test('admin model chain replaces the default order only for Default builds and keeps Fusion handling', async () => {
+  const { resolveRunModels, fusionModel, defaultModelChain } = await import('./run-with-model-fallback.mjs')
+  const admin = ['opencode/admin-a-free', 'opencode/admin-b-free']
+  assert.deepEqual(resolveRunModels({ adminChain: admin }).models, admin)
+  assert.deepEqual(resolveRunModels({ adminChain: admin, fusionEnabled: true }).models, [fusionModel, ...admin])
+  assert.deepEqual(resolveRunModels({ adminChain: [fusionModel, ...admin] }).models, admin)
+  assert.deepEqual(resolveRunModels({ adminChain: admin, fusionEnabled: true, requireShared: true }), { model: fusionModel, models: [fusionModel] })
+  assert.deepEqual(resolveRunModels({ adminChain: admin, fusionEnabled: true, route: 'own' }), { model: fusionModel, models: [fusionModel] })
+  assert.deepEqual(resolveRunModels({ adminChain: null }), resolveRunModels({}))
+  assert.deepEqual(resolveRunModels({ adminChain: [] }).models, resolveRunModels({}).models)
+  assert.equal(resolveRunModels({ selected: 'openai/gpt-6-luna', adminChain: admin }).model, 'openai/gpt-6-luna')
+  assert.deepEqual(resolveRunModels({ selected: 'openai/gpt-6-luna', adminChain: admin }).models.slice(1), defaultModelChain(false).filter(m => m !== 'openai/gpt-6-luna'))
+})
