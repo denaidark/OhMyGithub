@@ -136,6 +136,19 @@ export function appendBackupModel(candidates, env = process.env) {
   const fusion = candidates.includes(fusionModel) ? [fusionModel] : []
   return [...queue, backup, ...fusion]
 }
+
+/**
+ * Apply admin "skip direct OpenCode" routing: remove free OpenCode models from the chain.
+ * Route order with SKIP_DIRECT_OC=1:
+ * - WARP on: try through WARP proxy → backup → Fusion
+ * - WARP off: backup → Fusion only (no free model calls)
+ * Fusion is kept because it's not a "direct OpenCode" call.
+ */
+export function applySkipDirectRouting(candidates, env = process.env) {
+  if (env.SKIP_DIRECT_OC !== '1') return candidates
+  // Keep only non-free models (backup, selected paid providers) and Fusion
+  return candidates.filter(model => !freeEgressModel(model))
+}
 // Runtime egress switch: when WARP passed its startup probe (WARP_RUNTIME_SWITCH=1) but a free
 // model still hits FreeUsageLimit mid-build, move `opencode serve` to the DataImpulse relay once.
 // The script's stdout only carries ::add-mask:: lines and is discarded; its stderr (no secrets) goes to the run log.
@@ -185,7 +198,8 @@ export async function runModels({ binary, port, promptFile, logFile, exitFile, s
   const candidates = strictFusion ? [fusionModel] : [...new Set(models)].filter(model => !requiredShared || !freeEgressModel(model))
   if (!candidates.length || candidates.some(model => typeof model !== 'string' || !/^[\w.-]+\/[\w./:-]+$/.test(model))) throw new Error('Invalid model fallback candidates')
   // Last resort: the site-wide backup endpoint, only after every chain model failed.
-  const queue = appendBackupModel(candidates, env)
+  // Apply admin skip_direct_opencode routing: remove free models if SKIP_DIRECT_OC=1.
+  const queue = applySkipDirectRouting(appendBackupModel(candidates, env), env)
   let sessionID = env.RESUME_SESSION_ID || '', child, interrupted = false, code = 1
   const attempts = []
   let switched = false, dropped = false

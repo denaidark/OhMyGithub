@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine, appendBackupModel } from './run-with-model-fallback.mjs'
+import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine, appendBackupModel, applySkipDirectRouting } from './run-with-model-fallback.mjs'
 
 test('the backup endpoint runs after every model but before Fusion', () => {
   const chain = ['opencode/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion', 'opencode/glm-5.3-flash-free']
@@ -262,4 +262,38 @@ test('admin model chain replaces the default order only for Default builds and k
   assert.deepEqual(resolveRunModels({ adminChain: [] }).models, resolveRunModels({}).models)
   assert.equal(resolveRunModels({ selected: 'openai/gpt-6-luna', adminChain: admin }).model, 'openai/gpt-6-luna')
   assert.deepEqual(resolveRunModels({ selected: 'openai/gpt-6-luna', adminChain: admin }).models.slice(1), defaultModelChain(false).filter(m => m !== 'openai/gpt-6-luna'))
+})
+
+// Tests for admin routing toggle: SKIP_DIRECT_OC
+test('applySkipDirectRouting does nothing when SKIP_DIRECT_OC is not set', () => {
+  const chain = ['opencode/deepseek-v4.1-flash-free', 'omdev/backup', fusionModel]
+  assert.deepEqual(applySkipDirectRouting(chain, {}), chain)
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '0' }), chain)
+})
+
+test('applySkipDirectRouting removes free models when SKIP_DIRECT_OC=1', () => {
+  const chain = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'omdev/backup', fusionModel]
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), ['omdev/backup', fusionModel])
+})
+
+test('applySkipDirectRouting keeps Fusion and non-free models', () => {
+  const chain = ['openai/gpt-6-astra', 'opencode/deepseek-v4.1-flash-free', fusionModel]
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), ['openai/gpt-6-astra', fusionModel])
+})
+
+test('applySkipDirectRouting with only free models returns empty (backup should be present)', () => {
+  const chain = ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free']
+  assert.deepEqual(applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' }), [])
+})
+
+test('SKIP_DIRECT_OC route order: both off = all models', () => {
+  const chain = ['opencode/deepseek-v4.1-flash-free', 'omdev/backup', fusionModel]
+  const result = applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '' })
+  assert.deepEqual(result, chain)
+})
+
+test('SKIP_DIRECT_OC route order: skip on = backup and Fusion only', () => {
+  const chain = ['opencode/deepseek-v4.1-flash-free', 'omdev/backup', fusionModel]
+  const result = applySkipDirectRouting(chain, { SKIP_DIRECT_OC: '1' })
+  assert.deepEqual(result, ['omdev/backup', fusionModel])
 })
