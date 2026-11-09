@@ -884,23 +884,30 @@ jobs:
           script: |
             require(`${process.env.RUNTIME_DIR}/.github/scripts/github-rate-observer.cjs`).attach(github, process.env.OPENCODE_WEB_DIR);
             const number = Number(process.env.TRIGGER_ISSUE_NUMBER);
-            const response = await github.rest.issues.listLabelsOnIssue({
-              owner: process.env.TARGET_OWNER,
-              repo: process.env.TARGET_REPO,
-              issue_number: number,
-              sort: 'created',
-              direction: 'asc',
-              per_page: 100
-            });
-            const names = response.data.map(({ name }) => name);
+            const [labelsResponse, issueResponse] = await Promise.all([
+              github.rest.issues.listLabelsOnIssue({
+                owner: process.env.TARGET_OWNER,
+                repo: process.env.TARGET_REPO,
+                issue_number: number,
+                sort: 'created',
+                direction: 'asc',
+                per_page: 100
+              }),
+              github.rest.issues.get({
+                owner: process.env.TARGET_OWNER,
+                repo: process.env.TARGET_REPO,
+                issue_number: number
+              })
+            ]);
+            const names = labelsResponse.data.map(({ name }) => name);
             const modelLabels = names.filter((name) => name.startsWith('model/'));
             if (modelLabels.length > 1) {
               core.setFailed(`Expected at most one model/* label, found: ${modelLabels.join(', ')}`);
               return;
             }
-            // Free OpenCode models get retired (the API then answers "ModelDeprecated" and
-            // OpenCode reports "Unexpected server error"). Pick a live default from the catalog.
-            const { resolveRunModels } = await import(`${process.env.RUNTIME_DIR}/scripts/run-with-model-fallback.mjs`);
+            const { parseIssueRequest } = await import(`${process.env.RUNTIME_DIR}/scripts/issue-request.mjs`);
+            const { modelChain: adminChain } = parseIssueRequest(issueResponse.data);
+            const { resolveRunModels, fusionModel, preferredFreeModels } = await import(`${process.env.RUNTIME_DIR}/scripts/run-with-model-fallback.mjs`);
             const fusionEnabled = /^[a-f0-9]{40}$/.test(String(process.env.FUSION_PLUGIN_COMMIT || ''));
             let live = null;
             try {
@@ -910,7 +917,23 @@ jobs:
                 .map(([id]) => `opencode/${id}`);
             } catch (error) { core.warning(`OpenCode model catalog unavailable: ${error.message}`); }
             const requireShared = process.env.FUSION_REQUIRE_SHARED === 'true';
-            const { model, models } = resolveRunModels({ selected: modelLabels[0]?.slice('model/'.length), live, fusionEnabled, requireShared, forceSharedTest: process.env.FUSION_FORCE_SHARED_TEST === 'true', route: process.env.FUSION_ROUTE });
+            const selected = modelLabels[0]?.slice('model/'.length);
+            let model, models;
+            if (adminChain && adminChain.length > 0 && !selected) {
+              const liveSet = live ? new Set(live) : null;
+              const validChain = adminChain.filter(id => !liveSet || !preferredFreeModels.includes(id) || liveSet.has(id));
+              if (validChain.length > 0) {
+                if (fusionEnabled && validChain[0] !== fusionModel) validChain.unshift(fusionModel);
+                model = validChain[0];
+                models = validChain;
+                core.info(`Using admin model chain: ${validChain.join(' → ')}`);
+              } else {
+                core.warning('Admin model chain had no valid entries; falling back to default chain.');
+                ({ model, models } = resolveRunModels({ selected, live, fusionEnabled, requireShared, forceSharedTest: process.env.FUSION_FORCE_SHARED_TEST === 'true', route: process.env.FUSION_ROUTE }));
+              }
+            } else {
+              ({ model, models } = resolveRunModels({ selected, live, fusionEnabled, requireShared, forceSharedTest: process.env.FUSION_FORCE_SHARED_TEST === 'true', route: process.env.FUSION_ROUTE }));
+            }
             if (requireShared) core.info('Shared Fusion checkout overrides inherited model labels; primary cannot fall back to a free provider.');
             const skills = names.filter((name) => name.startsWith('skill/'))
               .map((name) => name.slice('skill/'.length)).sort();
