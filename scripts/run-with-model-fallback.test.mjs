@@ -8,7 +8,8 @@ import {
   fusionModel, defaultFreeModel, preferredFreeModels, resolveRunModels, 
   fusionUpstreamHost, freeEgressModel, attemptErrorClass,
   RouteKind, SelectionType, determineSelectionType, buildRouteSequence,
-  proxyTunnelError, acquireFusionOnDemand, DEFAULT_IDLE_TIMEOUT_MS
+  proxyTunnelError, acquireFusionOnDemand, DEFAULT_IDLE_TIMEOUT_MS,
+  fetchRoutingSettings
 } from './run-with-model-fallback.mjs'
 
 const deepseek = defaultFreeModel
@@ -527,6 +528,75 @@ test('local chain contract validation', () => {
   assert.ok(chain.chain.every(id => typeof id === 'string' && /^[\w.-]+\/[\w./:-]+$/.test(id)))
   assert.equal(typeof chain.fusion, 'string')
   assert.equal(typeof chain.default_free, 'string')
+})
+
+// ==================== fetchRoutingSettings tests (t248u) ====================
+
+test('fetchRoutingSettings returns API values', async () => {
+  const log = []
+  const logFile = { path: 'test.log', content: [] }
+  const mockAppend = (_, msg) => logFile.content.push(msg)
+  
+  // Mock successful fetch
+  const mockFetch = async (url) => {
+    assert.ok(url.includes('/api/routing-settings'))
+    return {
+      ok: true,
+      json: async () => ({ warp_enabled: true, skip_direct_oc: true })
+    }
+  }
+  
+  const result = await fetchRoutingSettings({ 
+    env: { OMGITHUB_ORIGIN: 'https://test.example.com' },
+    request: mockFetch
+  })
+  
+  assert.equal(result.warp_enabled, true)
+  assert.equal(result.skip_direct_oc, true)
+})
+
+test('fetchRoutingSettings returns defaults on error', async () => {
+  const mockFetch = async () => { throw new Error('Network error') }
+  
+  const result = await fetchRoutingSettings({ 
+    env: {},
+    request: mockFetch
+  })
+  
+  assert.equal(result.warp_enabled, false)
+  assert.equal(result.skip_direct_oc, false)
+})
+
+test('fetchRoutingSettings returns defaults on non-ok response', async () => {
+  const mockFetch = async () => ({
+    ok: false,
+    status: 500,
+    json: async () => ({ error: 'Internal error' })
+  })
+  
+  const result = await fetchRoutingSettings({ 
+    env: {},
+    request: mockFetch
+  })
+  
+  assert.equal(result.warp_enabled, false)
+  assert.equal(result.skip_direct_oc, false)
+})
+
+test('fetchRoutingSettings sanitizes boolean values', async () => {
+  const mockFetch = async () => ({
+    ok: true,
+    json: async () => ({ warp_enabled: 'true', skip_direct_oc: 1 })  // Non-boolean values
+  })
+  
+  const result = await fetchRoutingSettings({ 
+    env: {},
+    request: mockFetch
+  })
+  
+  // Non-boolean values should be treated as false
+  assert.equal(result.warp_enabled, false)
+  assert.equal(result.skip_direct_oc, false)
 })
 
 test('selection type semantics match picker behavior', () => {

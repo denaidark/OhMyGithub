@@ -373,6 +373,37 @@ export async function acquireFusionOnDemand({ env = process.env, request = fetch
 export const DEFAULT_IDLE_TIMEOUT_MS = 180000
 
 /**
+ * Fetch admin routing settings from OmGithub API.
+ * Returns { warp_enabled, skip_direct_oc } or defaults on failure.
+ */
+export async function fetchRoutingSettings({ env = process.env, request = fetch, logFile }) {
+  const origin = env.OMGITHUB_ORIGIN || 'https://omgithub.com'
+  const defaults = { warp_enabled: false, skip_direct_oc: false }
+  
+  try {
+    const response = await request(`${origin}/api/routing-settings`, {
+      signal: AbortSignal.timeout(5000)
+    })
+    if (response.ok) {
+      const data = await response.json()
+      const settings = {
+        warp_enabled: data.warp_enabled === true,
+        skip_direct_oc: data.skip_direct_oc === true
+      }
+      if (logFile) {
+        appendFileSync(logFile, `[model-fallback] Routing settings: warp=${settings.warp_enabled}, skipDirectOC=${settings.skip_direct_oc}\n`)
+      }
+      return settings
+    }
+  } catch (error) {
+    if (logFile) {
+      appendFileSync(logFile, `[model-fallback] Routing settings fetch failed (${error.message}), using defaults.\n`)
+    }
+  }
+  return defaults
+}
+
+/**
  * Route-based fallback state machine.
  * 
  * Selection types determine fallback chains:
@@ -396,18 +427,24 @@ export async function runModels({
   dropProxy, 
   lazyProxy = lazyProxySetup({ env, binary, logFile }),
   acquireFusion = acquireFusionOnDemand,
-  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  routingSettings = null  // { warp_enabled, skip_direct_oc } - fetched if null
 }) {
   const directory = dirname(logFile), prompt = readFileSync(promptFile, 'utf8')
   const requiredShared = env.FUSION_REQUIRE_SHARED === 'true'
   if (requiredShared && env.FUSION_ROUTE !== 'shared') throw new Error('Required shared Fusion route unavailable')
+  
+  // Fetch routing settings if not provided (t248u)
+  const settings = routingSettings ?? await fetchRoutingSettings({ env, logFile })
+  const warpEnabled = settings.warp_enabled === true
+  const skipDirectOC = settings.skip_direct_oc === true
   
   // Determine selection type based on user's choice
   const selectionType = determineSelectionType(selected, env.FUSION_ROUTE)
   const hasFusionCredentials = Boolean(env.FUSION_ACCESS_TOKEN)
   const backupModel = env.OMG_BACKUP_MODEL
   
-  appendFileSync(logFile, `[model-fallback] Selection type: ${selectionType}, selected: ${selected || 'none'}, fusionRoute: ${env.FUSION_ROUTE || 'none'}, models: ${models.length}\n`)
+  appendFileSync(logFile, `[model-fallback] Selection type: ${selectionType}, selected: ${selected || 'none'}, fusionRoute: ${env.FUSION_ROUTE || 'none'}, models: ${models.length}, warp=${warpEnabled}, skipDirectOC=${skipDirectOC}\n`)
   
   // Fix #1: Wire workflow-resolved models to route state machine
   // Convert selection type to proper route queue with bounded semantics
@@ -416,7 +453,9 @@ export async function runModels({
     selected,
     fusionRoute: env.FUSION_ROUTE || 'none',
     backupModel,
-    hasFusionCredentials
+    hasFusionCredentials,
+    warpEnabled,
+    skipDirectOC
   })
   
   // For EXPLICIT_OTHER, prepend the selected model (not a standard route)
