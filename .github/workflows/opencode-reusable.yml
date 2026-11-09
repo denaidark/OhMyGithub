@@ -662,7 +662,15 @@ jobs:
             '.plugins = (((.plugins // []) + [$plugin]) | unique)' \
             "$HOME/.config/opencode/opencode.json" > "$config_tmp"
           /usr/bin/time -p mv "$config_tmp" "$HOME/.config/opencode/opencode.json"
-          if [[ -n "${FUSION_ACCESS_TOKEN:-}" ]]; then
+          # P0-3: Install Fusion plugin when:
+          #   - FUSION_ACCESS_TOKEN exists (direct credentials), OR
+          #   - OMGITHUB_CALLBACK_TOKEN exists (enables on-demand lease acquisition)
+          # Gateway can acquire credentials dynamically without initial FUSION_ACCESS_TOKEN
+          fusion_eligible=false
+          if [[ -n "${FUSION_ACCESS_TOKEN:-}" ]] || [[ -n "${OMGITHUB_CALLBACK_TOKEN:-}" ]]; then
+            fusion_eligible=true
+          fi
+          if [[ "$fusion_eligible" == "true" ]]; then
             plugin_repo='https://github.com/denaidark/opencode-copilot-fusion.git'
             plugin_commit='8275beda04bbfaa395c073a6b83f89c93801bca2'
             if [[ "$plugin_commit" =~ ^[a-f0-9]{40}$ ]]; then
@@ -799,10 +807,18 @@ jobs:
           
           # Start Fusion Gateway BEFORE serve when plugin is available
           # Gateway proxies plugin requests with credential injection
+          # P0-3: Start gateway even without initial FUSION_ACCESS_TOKEN (for on-demand lease)
           FUSION_GATEWAY_PORT=""
           if [[ "${plugin_commit:-}" =~ ^[a-f0-9]{40}$ ]]; then
             echo "Starting Fusion Gateway..."
-            FUSION_SHARED_UPSTREAMS="${FUSION_SHARED_PROXY_HOST:-}" \
+            # Pass callback token and origin for on-demand lease acquisition
+            OMGITHUB_CALLBACK_TOKEN="${OMGITHUB_CALLBACK_TOKEN:-}" \
+              OMGITHUB_ORIGIN="${OMGITHUB_ORIGIN:-https://omgithub.com}" \
+              GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}" \
+              TRIGGER_ISSUE_NUMBER="${TRIGGER_ISSUE_NUMBER:-}" \
+              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" \
+              GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+              FUSION_SHARED_UPSTREAMS="${FUSION_SHARED_PROXY_HOST:-}" \
               bash "$RUNTIME_DIR/scripts/start-fusion-gateway.sh" "$OPENCODE_WEB_DIR" \
               > "$OPENCODE_WEB_DIR/fusion-gateway-start.log" 2>&1 || {
                 echo "::warning title=Fusion Gateway::Gateway startup failed; continuing without gateway"
@@ -815,6 +831,9 @@ jobs:
               echo "Fusion Gateway ready on port $FUSION_GATEWAY_PORT"
               # Summary
               echo "- Fusion Gateway: port $FUSION_GATEWAY_PORT" >> "$GITHUB_STEP_SUMMARY"
+              # P0-3: Export gateway env for runtime scripts
+              printf 'FUSION_GATEWAY_PORT=%s\n' "$FUSION_GATEWAY_PORT" >> "$GITHUB_ENV"
+              printf 'FUSION_CONTROL_SOCKET=%s\n' "${FUSION_CONTROL_SOCKET:-}" >> "$GITHUB_ENV"
             fi
           fi
           
