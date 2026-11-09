@@ -723,8 +723,9 @@ jobs:
           else
             DEVICE_PROXY=''
           fi
-          # Settings > Enable WARP (on by default) adds the warp label. Default with Fusion
-          # (plugin resolved on this run) skips WARP; any picked model or Default without Fusion uses it.
+          # Admin routing toggles (Enable WARP, Skip direct OpenCode) plus per-user WARP label.
+          # Default with Fusion skips WARP; admin Enable WARP overrides. Admin Skip direct
+          # removes free model calls (SKIP_DIRECT_OC=1 exported to env if set).
           # Still set up WARP/DataImpulse when the phone is up — models.opencode.ai needs that path.
           fusion_on=false
           [[ "${plugin_commit:-}" =~ ^[a-f0-9]{40}$ ]] && fusion_on=true
