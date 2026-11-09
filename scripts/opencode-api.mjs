@@ -109,6 +109,21 @@ export function createOpenCodeClient({ base, password, request = fetch, now = Da
     return { ok: false, status: response.status, error }
   }
   
+  // POST /api/session - create or adopt a session
+  // Returns { ok, status, data: { id, ... } }
+  // P0-4: Required for proper session lifecycle with explicit creation
+  async function createSession({ id, location }) {
+    return api('/api/session', {
+      method: 'POST',
+      body: { id, location }
+    })
+  }
+  
+  // GET /api/session/:id - get session info
+  async function getSession(sessionId) {
+    return api(`/api/session/${sessionId}`)
+  }
+  
   // POST /api/session/:id/model - set model for subsequent turns
   // model: { providerID, id, variant? } object
   async function setModel(sessionId, model) {
@@ -264,6 +279,8 @@ export function createOpenCodeClient({ base, password, request = fetch, now = Da
   }
   
   return {
+    createSession,
+    getSession,
     setModel,
     sendPrompt,
     sendSynthetic,

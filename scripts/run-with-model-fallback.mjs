@@ -1019,6 +1019,7 @@ export async function runModels({
       appendFileSync(logFile, `[model-fallback] Trying ${model} (route: ${route})\n`)
       const fd = openSync(logFile, 'a')
       let failure, observedSession = false, pending = { out: '', err: '' }
+      let lastHttpOutcome = null  // P0-6: Store HTTP API outcome for post-execution handling
       
       // Fix #4: Track actual progress (tool events, assistant output) not just heartbeats
       let lastProgressTime = Date.now()
@@ -1084,6 +1085,8 @@ export async function runModels({
         // P0-3: Normalize failure to string for error classifiers
         failure = typeof httpResult.failure === 'string' ? httpResult.failure : normalizeError(httpResult.failure)
         observedSession = true
+        // P0-6: Store outcome from httpResult for use in post-execution handling
+        lastHttpOutcome = httpResult.outcome
         
         // Update first attempt flag (admission persistence handled by callback)
         if (wasFirstAttempt) {
@@ -1122,7 +1125,7 @@ export async function runModels({
       // For HTTP API, we already have the outcome from executeViaHTTP
       // For CLI, query the snapshot to verify terminal state
       if (httpClient) {
-        // HTTP API: outcome was set during execution, trust it
+        // HTTP API: P0-6 - use actual outcome from executeViaHTTP stored in lastHttpOutcome
         // Map HTTP outcomes to terminal outcomes for consistency
         const httpOutcomeMap = {
           'succeeded': 'succeeded',
@@ -1134,9 +1137,8 @@ export async function runModels({
           'connection_lost': 'failed',
           'exception': 'failed'
         }
-        // Get outcome from httpResult that was stored
-        const httpOutcome = attempts.length > 0 ? null : 'unverified'  // Will be set below
-        outcome = httpOutcomeMap[httpOutcome] || (code === 0 ? 'succeeded' : 'failed')
+        // P0-6: Use actual outcome from httpResult, not placeholder
+        outcome = httpOutcomeMap[lastHttpOutcome] || (code === 0 ? 'succeeded' : 'failed')
       } else {
         // CLI: query snapshot for actual outcome
         const terminal = observedSession && !interrupted && cliCode < 128 ? await terminalAttemptOutcome({ api, sessionID, started }) : null
