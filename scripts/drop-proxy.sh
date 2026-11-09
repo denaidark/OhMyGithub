@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Dead proxy mid-build (tunnels refused, e.g. DataImpulse 407 TRAFFIC_EXHAUSTED): restart
-# `opencode serve` on the fallback recorded by the runtime switch (the WARP relay), or on the
-# runner network when there is none. Records warp.proxy_drop for admin stats. No secrets here.
+# Dead proxy mid-build (tunnels refused, e.g. WARP connection issues): restart
+# `opencode serve` on the fallback (if any), or on the runner network when there is none.
+# Records warp.proxy_drop for admin stats. No secrets here.
+# DataImpulse/residential proxy removed per t256 authorization.
 set -uo pipefail
 set +x
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

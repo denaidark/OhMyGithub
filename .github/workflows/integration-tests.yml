@@ -1,0 +1,118 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main, 'cursor/**']
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/integration-tests.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Run route fallback tests
+        run: node --test scripts/run-with-model-fallback.test.mjs
+      
+      - name: Run transport adapter tests
+        run: node --test scripts/transport-adapter.test.mjs
+      
+      - name: Run gateway unit tests
+        run: node --test scripts/fusion-gateway.test.mjs
+      
+      - name: Run stub integration tests
+        run: node --test scripts/fusion-integration.test.mjs
+
+  controller-integration:
+    name: Controller Integration (Real Binary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Install OpenCode v2.2.5
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
+            https://opencode.ai/v2/install -o /tmp/install-v2.sh
+          bash /tmp/install-v2.sh --version 2.2.5 --no-modify-path
+          $HOME/.opencode/bin/opencode --version
+          
+      - name: Verify OpenCode version
+        run: |
+          version="$($HOME/.opencode/bin/opencode --version)"
+          echo "Installed: $version"
+          [[ "$version" == "opencode v2.2.5" ]] || { echo "Version mismatch"; exit 1; }
+          
+      - name: Record binary SHA256
+        run: |
+          sha256sum $HOME/.opencode/bin/opencode | tee /tmp/opencode-sha256.txt
+          
+      - name: Run controller integration tests
+        env:
+          OPENCODE_BIN: ${{ github.workspace }}/../.opencode/bin/opencode
+        run: |
+          export OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+          node --test scripts/controller-integration.test.mjs 2>&1 | tee /tmp/controller-tests.log
+          
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs
+          path: |
+            /tmp/opencode-sha256.txt
+            /tmp/controller-tests.log
+          retention-days: 7
+
+  warp-decision:
+    name: WARP Decision Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Test WARP decision logic
+        run: |
+          # Test admin_disabled gate
+          result="$(node scripts/warp-decision.mjs true true '[]' 2>/dev/null)" || true
+          echo "Default (no admin fetch): $result"
+          
+          # Test label parsing
+          node -e "
+            import { labelNames, warpDecision } from './scripts/warp-decision.mjs';
+            import assert from 'node:assert/strict';
+            
+            // Label parsing
+            assert.deepEqual(labelNames('[\"test\", \"warp\"]'), ['test', 'warp']);
+            assert.deepEqual(labelNames('[{\"name\":\"test\"}]'), ['test']);
+            
+            // Decision logic
+            assert.equal(warpDecision({ requested: false, fusionEnabled: true, labels: [], adminWarpEnabled: true }), 'off');
+            assert.equal(warpDecision({ requested: true, fusionEnabled: true, labels: [], adminWarpEnabled: true }), 'skip');
+            assert.equal(warpDecision({ requested: true, fusionEnabled: false, labels: [], adminWarpEnabled: true }), 'on');
+            assert.equal(warpDecision({ requested: true, fusionEnabled: true, labels: ['model/test'], adminWarpEnabled: true }), 'on');
+            assert.equal(warpDecision({ requested: true, fusionEnabled: true, labels: [], adminWarpEnabled: false }), 'admin_disabled');
+            
+            console.log('All WARP decision tests passed');
+          "

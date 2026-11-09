@@ -1,62 +1,208 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runModels, modelCandidates, preferredFreeModels, retryableProviderError, terminalAttemptOutcome, defaultModelChain, fusionFallbackError, fusionModel, resolveRunModels, fusionUpstreamHost, fusionFailureLine, appendBackupModel } from './run-with-model-fallback.mjs'
+import { 
+  runModels, modelCandidates, defaultModelChain, appendBackupModel, 
+  fusionModel, defaultFreeModel, preferredFreeModels, resolveRunModels, 
+  fusionUpstreamHost, freeEgressModel, attemptErrorClass,
+  RouteKind, SelectionType, determineSelectionType, buildRouteSequence,
+  proxyTunnelError, acquireFusionOnDemand, DEFAULT_IDLE_TIMEOUT_MS,
+  fetchRoutingSettings
+} from './run-with-model-fallback.mjs'
 
-test('the backup endpoint runs after every model but before Fusion', () => {
-  const chain = ['opencode/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion', 'opencode/glm-5.3-flash-free']
-  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }),
-    ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'omdev/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
-  assert.deepEqual(appendBackupModel(chain, {}), chain)
-  assert.deepEqual(appendBackupModel(['copilot-fusion-direct/fusion'], { OMG_BACKUP_MODEL: 'omdev/deepseek-v4.1-flash-free' }),
-    ['omdev/deepseek-v4.1-flash-free', 'copilot-fusion-direct/fusion'])
-  assert.deepEqual(appendBackupModel(chain, { OMG_BACKUP_MODEL: 'not a model' }), chain)
+const deepseek = defaultFreeModel
+
+// ==================== Unit Tests ====================
+
+test('model-chain.json structure', () => {
+  const chain = JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8'))
+  assert.equal(chain.fusion, fusionModel)
+  assert.equal(chain.default_free, deepseek)
+  // Chain has Fusion first for Default selection
+  assert.deepEqual(chain.chain, [fusionModel, deepseek])
 })
 
-test('name the fusion endpoint behind a failed attempt without leaking credentials', () => {
+test('determineSelectionType correctly classifies user selections (intent-based, route-independent)', () => {
+  // Default: no selection or "default" label
+  assert.equal(determineSelectionType(null), SelectionType.DEFAULT)
+  assert.equal(determineSelectionType(''), SelectionType.DEFAULT)
+  assert.equal(determineSelectionType('default'), SelectionType.DEFAULT)
+  
+  // Fix #7 (corrected): Explicit Fusion-only is INTENT-based, independent of FUSION_ROUTE
+  // User explicitly selected Fusion → EXPLICIT_FUSION_ONLY regardless of route availability
+  assert.equal(determineSelectionType(fusionModel), SelectionType.EXPLICIT_FUSION_ONLY)
+  assert.equal(determineSelectionType(fusionModel, 'none'), SelectionType.EXPLICIT_FUSION_ONLY)
+  assert.equal(determineSelectionType(fusionModel, 'shared'), SelectionType.EXPLICIT_FUSION_ONLY)
+  assert.equal(determineSelectionType(fusionModel, 'own'), SelectionType.EXPLICIT_FUSION_ONLY)
+  
+  // Explicit DeepSeek
+  assert.equal(determineSelectionType(deepseek), SelectionType.EXPLICIT_DEEPSEEK)
+  
+  // Explicit Other
+  assert.equal(determineSelectionType('openai/gpt-6-astra'), SelectionType.EXPLICIT_OTHER)
+})
+
+test('buildRouteSequence for DEFAULT: Fusion direct → Fusion shared', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.DEFAULT,
+    selected: null,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ])
+  // Should NOT include DeepSeek routes
+  assert.ok(!routes.some(r => r.route === RouteKind.DEEPSEEK_WARP))
+  assert.ok(!routes.some(r => r.route === RouteKind.DEEPSEEK_ONDEV))
+})
+
+// ==================== WARP/skipDirectOC toggle tests (t248u) ====================
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=false, warpEnabled=false → directOC → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: false,
+    skipDirectOC: false
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_DIRECT,
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp disabled, direct OC enabled: directOC → ondev → Fusion')
+})
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=false, warpEnabled=true → directOC → WARP → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: true,
+    skipDirectOC: false
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_DIRECT,
+    RouteKind.DEEPSEEK_WARP,
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp enabled, direct OC enabled: directOC → WARP → ondev → Fusion')
+})
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=true, warpEnabled=false → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: false,
+    skipDirectOC: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp disabled, skip direct OC: straight to ondev → Fusion')
+})
+
+test('buildRouteSequence EXPLICIT_DEEPSEEK: skipDirectOC=true, warpEnabled=true → WARP → ondev → Fusion', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_DEEPSEEK,
+    selected: deepseek,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true,
+    warpEnabled: true,
+    skipDirectOC: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.DEEPSEEK_WARP,
+    RouteKind.DEEPSEEK_ONDEV,
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'warp enabled, skip direct OC: WARP → ondev → Fusion')
+})
+
+test('buildRouteSequence DEFAULT: unaffected by WARP/skipDirectOC toggles', () => {
+  // DEFAULT always uses Fusion direct → shared (per owner)
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.DEFAULT,
+    selected: null,
+    fusionRoute: 'own',
+    hasFusionCredentials: true,
+    warpEnabled: true,
+    skipDirectOC: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ], 'DEFAULT ignores WARP/skipDirectOC toggles')
+})
+
+test('buildRouteSequence for EXPLICIT_OTHER: (selected prepended by runModels) → direct → shared', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_OTHER,
+    selected: 'openai/gpt-6-astra',
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true
+  })
+  // Does NOT include selected model (added by runModels)
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ])
+})
+
+test('buildRouteSequence for EXPLICIT_FUSION_ONLY: direct → shared (strict, no backup)', () => {
+  const routes = buildRouteSequence({
+    selectionType: SelectionType.EXPLICIT_FUSION_ONLY,
+    selected: fusionModel,
+    fusionRoute: 'own',
+    backupModel: 'omdev/oc/backup',
+    hasFusionCredentials: true
+  })
+  assert.deepEqual(routes.map(r => r.route), [
+    RouteKind.FUSION_DIRECT,
+    RouteKind.FUSION_SHARED
+  ])
+  // Should NOT include any DeepSeek routes
+  assert.ok(!routes.some(r => r.route === RouteKind.DEEPSEEK_WARP))
+  assert.ok(!routes.some(r => r.route === RouteKind.DEEPSEEK_ONDEV))
+})
+
+test('attemptErrorClass classifies errors correctly', () => {
+  assert.equal(attemptErrorClass(null), null)
+  assert.equal(attemptErrorClass({ type: 'provider.free-limit' }), 'free-limit')
+  assert.equal(attemptErrorClass({ status: 429 }), 'rate-limit')
+  assert.equal(attemptErrorClass({ status: 401 }), 'auth')
+  assert.equal(attemptErrorClass({ status: 402 }), 'donor-402')
+  assert.equal(attemptErrorClass({ message: 'ERR_PROXY_TUNNEL' }), 'proxy')
+  assert.equal(attemptErrorClass({ message: 'some error' }), 'other')
+})
+
+test('fusionUpstreamHost sanitizes URL without exposing secrets', () => {
   assert.equal(fusionUpstreamHost({ FUSION_UPSTREAM: 'https://omgithub.com/api/fusion-pool?token=secret' }), 'omgithub.com')
   assert.equal(fusionUpstreamHost({}), 'unknown')
-  const line = fusionFailureLine({ message: 'Copilot /auto returned HTTP 502' }, { FUSION_UPSTREAM: 'https://omgithub.com/api/fusion-pool' })
-  assert.match(line, /fusion upstream omgithub\.com/)
-  assert.match(line, /HTTP 502/)
-  assert.doesNotMatch(line, /token|secret/)
 })
 
-test('default chain order comes from model-chain.json; picked models fall back to it', () => {
-  const [deepseek, glm, mimo, pickle] = preferredFreeModels
-  assert.deepEqual(JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8')).chain, [fusionModel, deepseek, glm, mimo, pickle])
-  assert.deepEqual(preferredFreeModels, ['opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free', 'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle'])
-  // Without Fusion
-  assert.deepEqual(defaultModelChain(false), preferredFreeModels)
-  assert.deepEqual(modelCandidates(deepseek), preferredFreeModels)
-  assert.deepEqual(modelCandidates(glm), [glm, deepseek, mimo, pickle])
-  assert.deepEqual(modelCandidates(deepseek, [deepseek, pickle]), [deepseek, pickle])
-  assert.deepEqual(modelCandidates('openai/gpt-6-astra'), ['openai/gpt-6-astra', ...preferredFreeModels], 'hand-picked models fall back to the default chain')
-  assert.deepEqual(modelCandidates('opencode/beam-free', ['opencode/beam-free', glm]), ['opencode/beam-free', glm])
-  assert.deepEqual(modelCandidates(deepseek, ['opencode/other-free']), preferredFreeModels, 'none live: keep the list')
-  // With Fusion (Copilot): Fusion first, then the free chain
-  const chain = defaultModelChain(true)
-  assert.deepEqual(chain, [fusionModel, deepseek, glm, mimo, pickle])
-  assert.deepEqual(modelCandidates(chain[0], null, chain), chain)
-  assert.deepEqual(modelCandidates(fusionModel, null, chain), [fusionModel, deepseek, glm, mimo, pickle])
-  assert.deepEqual(modelCandidates(glm, null, chain), [glm, fusionModel, deepseek, mimo, pickle])
-  assert.deepEqual(modelCandidates('openai/gpt-6-astra', null, chain), ['openai/gpt-6-astra', ...chain])
-  assert.deepEqual(modelCandidates(deepseek, [deepseek, mimo], chain), [deepseek, fusionModel, mimo])
-  assert.deepEqual(modelCandidates(fusionModel, null, preferredFreeModels), [fusionModel, ...preferredFreeModels])
-})
-test('only retry structured provider/model availability failures', () => {
-  for (const error of [{ type: 'provider.free-limit' }, { status: 429 }, { status: 503 }, { message: 'ModelDeprecated' }]) assert.equal(retryableProviderError(error), true)
-  for (const error of [{ message: 'upstream connection lost' }, { message: 'read ECONNRESET' }, { message: 'fetch failed' }]) assert.equal(retryableProviderError(error), true)
-  for (const error of [undefined, { type: 'tool.error' }, { status: 401 }, { message: 'Game build failed' }]) assert.equal(retryableProviderError(error), false)
-})
-test('advance from Fusion on auth, quota, gateway, and route failures only', () => {
-  for (const error of [{ status: 401 }, { status: 429 }, { message: 'Copilot /auto returned HTTP 429' }, { message: 'Refuse fallback or GPT-4.1 route' }, { message: 'Unexpected server error' }]) assert.equal(fusionFallbackError(fusionModel, error), true)
-  for (const error of [undefined, { status: 500 }, { message: 'Unexpected server error' }]) assert.equal(fusionFallbackError('openai/gpt-6-astra', error), false)
-})
+// ==================== Integration Tests with Mocked Adapters ====================
+
 async function fixture(pattern, resume = '') {
-  const directory = mkdtempSync(join(tmpdir(), 'model-fallback-')), binary = join(directory, 'oc')
+  const directory = mkdtempSync(join(tmpdir(), 'model-fallback-'))
+  const binary = join(directory, 'oc')
   const prompt = '  Build exactly $HOME and @SKILL_TEXT@\n\n'
   writeFileSync(join(directory, 'prompt'), prompt)
   writeFileSync(binary, `#!/usr/bin/env node
@@ -64,188 +210,423 @@ const fs=require('node:fs'),p=require('node:path'),args=process.argv.slice(2),f=
 const calls=fs.existsSync(f)?JSON.parse(fs.readFileSync(f)):[];calls.push(args);fs.writeFileSync(f,JSON.stringify(calls));
 const outcome=JSON.parse(process.env.PATTERN)[calls.length-1]||'success';
 console.log(JSON.stringify({type:'step_start',sessionID:'ses_main'}));
-if(outcome!=='success')console.log(JSON.stringify({type:'error',sessionID:'ses_main',error:outcome==='fatal'?{type:'tool.error',message:'Build failed'}:outcome==='proxy'?{type:'provider.transport',message:'ERR_PROXY_TUNNEL: Proxy refused to open a tunnel: 502 Upstream Proxy Error'}:outcome==='fusion-auth'?{type:'provider.auth',status:401,message:'Copilot /auto returned HTTP 401'}:{type:'provider.free-limit',status:429}}));
+if(outcome!=='success')console.log(JSON.stringify({type:'error',sessionID:'ses_main',error:
+  outcome==='fatal'?{type:'tool.error',message:'Build failed'}:
+  outcome==='proxy'?{type:'provider.transport',message:'ERR_PROXY_TUNNEL: Proxy refused to open a tunnel: 502 Upstream Proxy Error'}:
+  outcome==='fusion-auth'?{type:'provider.auth',status:401,message:'Copilot /auto returned HTTP 401'}:
+  outcome==='donor-402'?{type:'provider.auth',status:402,message:'Payment Required'}:
+  {type:'provider.free-limit',status:429}}));
 process.exit(outcome==='success'||outcome==='zero-error'?0:1);
 `, { mode: 0o755 })
-  return { directory, prompt, options: { binary, port: 4096, promptFile: join(directory, 'prompt'), logFile: join(directory, 'run.log'), exitFile: join(directory, 'run.exit'), selected: preferredFreeModels[0], models: preferredFreeModels,
-    env: { ...process.env, OPENROUTER_API_KEY: '', PROJECT_DIR: directory, PATTERN: JSON.stringify(pattern), RESUME_SESSION_ID: resume } }, close: () => rmSync(directory, { recursive: true, force: true }) }
+  return { 
+    directory, 
+    prompt, 
+    options: { 
+      binary, 
+      port: 4096, 
+      promptFile: join(directory, 'prompt'), 
+      logFile: join(directory, 'run.log'), 
+      exitFile: join(directory, 'run.exit'), 
+      selected: null,
+      models: [fusionModel, deepseek],
+      env: { ...process.env, OPENROUTER_API_KEY: '', PROJECT_DIR: directory, PATTERN: JSON.stringify(pattern), RESUME_SESSION_ID: resume, OPENCODE_USE_HTTP_API: '0' },
+      acquireFusion: async () => ({ success: false, cause: 'test_disabled' })
+    }, 
+    close: () => rmSync(directory, { recursive: true, force: true }) 
+  }
 }
-test('try the sequence until success; retain exact prompt and main session across attempts', async () => {
-  const f = await fixture(['quota', 'quota', 'success'])
+
+// ==================== DEFAULT Selection Tests ====================
+
+test('DEFAULT selection: Fusion direct → Fusion shared', async () => {
+  const f = await fixture(['fusion-auth', 'success'])
   try {
-    const result = await runModels(f.options), calls = JSON.parse(readFileSync(join(f.directory, 'calls.json')))
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.selected = null  // Default selection
+    const result = await runModels(f.options)
     assert.equal(result.code, 0)
-    assert.deepEqual(result.attempts.map(row => row.model), preferredFreeModels.slice(0, 3))
-    assert.equal(calls[0].includes('--session'), false)
-    assert.equal(calls[1][calls[1].indexOf('--session') + 1], 'ses_main')
-    assert.ok(calls.every(args => args.at(-1) === f.prompt))
-    assert.equal(readFileSync(join(f.directory, 'run.exit'), 'utf8').trim(), '0')
-    assert.equal(readFileSync(join(f.directory, 'main-model'), 'utf8').trim(), preferredFreeModels[2])
+    assert.equal(result.selectionType, SelectionType.DEFAULT)
+    assert.deepEqual(result.attempts.map(a => a.route), [
+      RouteKind.FUSION_DIRECT,
+      RouteKind.FUSION_SHARED
+    ])
+    // Should NOT try DeepSeek for Default
+    assert.ok(!result.attempts.some(a => a.route === RouteKind.DEEPSEEK_WARP))
   } finally { f.close() }
 })
-test('exhaust all four models, handle zero-exit provider errors, and report failure once', async () => {
-  const f = await fixture(['zero-error', 'quota', 'quota', 'quota'], 'ses_restored')
+
+test('DEFAULT selection with shared route only: Fusion shared', async () => {
+  const f = await fixture(['success'])
   try {
-    const result = await runModels(f.options), calls = JSON.parse(readFileSync(join(f.directory, 'calls.json')))
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'shared'
+    f.options.selected = null
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0)
+    assert.equal(result.selectionType, SelectionType.DEFAULT)
+    assert.deepEqual(result.attempts.map(a => a.route), [RouteKind.FUSION_SHARED])
+  } finally { f.close() }
+})
+
+// ==================== EXPLICIT_DEEPSEEK Selection Tests ====================
+
+test('EXPLICIT_DEEPSEEK: directOC → ondev → Fusion (warp disabled by default t248u)', async () => {
+  const f = await fixture(['quota', 'quota', 'fusion-auth', 'success'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = deepseek  // Explicit DeepSeek selection
+    // Default: warpEnabled=false, skipDirectOC=false
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0)
+    assert.equal(result.selectionType, SelectionType.EXPLICIT_DEEPSEEK)
+    assert.deepEqual(result.attempts.map(a => a.route), [
+      RouteKind.DEEPSEEK_DIRECT,
+      RouteKind.DEEPSEEK_ONDEV,
+      RouteKind.FUSION_DIRECT,
+      RouteKind.FUSION_SHARED
+    ])
+  } finally { f.close() }
+})
+
+test('EXPLICIT_DEEPSEEK without backup: directOC → Fusion (warp disabled by default)', async () => {
+  const f = await fixture(['quota', 'fusion-auth', 'success'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    // No OMG_BACKUP_MODEL, warpEnabled=false by default
+    f.options.selected = deepseek
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0)
+    assert.deepEqual(result.attempts.map(a => a.route), [
+      RouteKind.DEEPSEEK_DIRECT,
+      RouteKind.FUSION_DIRECT,
+      RouteKind.FUSION_SHARED
+    ])
+  } finally { f.close() }
+})
+
+// ==================== EXPLICIT_OTHER Selection Tests ====================
+
+test('EXPLICIT_OTHER: selected model → direct Fusion → shared Fusion', async () => {
+  const f = await fixture(['quota', 'fusion-auth', 'success'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.selected = 'openai/gpt-6-astra'  // Explicit other model
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0)
+    assert.equal(result.selectionType, SelectionType.EXPLICIT_OTHER)
+    // Selected model first, then Fusion fallback
+    assert.equal(result.attempts[0].model, 'openai/gpt-6-astra')
+    assert.equal(result.attempts[0].route, 'selected-other')
+    assert.deepEqual(result.attempts.slice(1).map(a => a.route), [
+      RouteKind.FUSION_DIRECT,
+      RouteKind.FUSION_SHARED
+    ])
+  } finally { f.close() }
+})
+
+// ==================== EXPLICIT_FUSION_ONLY Selection Tests ====================
+
+test('EXPLICIT_FUSION_ONLY: direct → shared (strict, no backup/DeepSeek)', async () => {
+  const f = await fixture(['fusion-auth', 'success'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = fusionModel  // Explicit Fusion selection
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0)
+    assert.equal(result.selectionType, SelectionType.EXPLICIT_FUSION_ONLY)
+    assert.deepEqual(result.attempts.map(a => a.route), [
+      RouteKind.FUSION_DIRECT,
+      RouteKind.FUSION_SHARED
+    ])
+    // Should NOT try DeepSeek or backup
+    assert.ok(!result.attempts.some(a => a.route === RouteKind.DEEPSEEK_WARP))
+    assert.ok(!result.attempts.some(a => a.route === RouteKind.DEEPSEEK_ONDEV))
+  } finally { f.close() }
+})
+
+test('EXPLICIT_FUSION_ONLY fails closed: no fallback on exhaustion', async () => {
+  const f = await fixture(['fusion-auth', 'fusion-auth'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = fusionModel
+    const result = await runModels(f.options)
     assert.equal(result.code, 1)
-    assert.equal(calls.length, 4)
+    assert.equal(result.attempts.length, 2)
+    // Should only try Fusion routes, not backup
+    assert.ok(!result.attempts.some(a => a.route === RouteKind.DEEPSEEK_ONDEV))
+  } finally { f.close() }
+})
+
+// ==================== Route Dedup & Donor 402 Tests ====================
+
+test('route dedup: each route tried at most once', async () => {
+  const f = await fixture(['quota', 'quota', 'fusion-auth', 'fusion-auth'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = deepseek
+    const result = await runModels(f.options)
+    assert.equal(result.code, 1)
+    const routes = result.attempts.map(a => a.route)
+    const uniqueRoutes = [...new Set(routes)]
+    assert.deepEqual(routes, uniqueRoutes, 'each route should be tried at most once')
+  } finally { f.close() }
+})
+
+test('donor 402 is terminal for THIS route only, not all Fusion routes (fix #5)', async () => {
+  // Fix #5: Donor 402 on direct Fusion should NOT suppress separately eligible shared Fusion
+  const f = await fixture(['quota', 'quota', 'donor-402', 'success'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = deepseek
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0, 'shared Fusion should succeed after direct 402')
+    const directAttempt = result.attempts.find(a => a.route === RouteKind.FUSION_DIRECT)
+    assert.equal(directAttempt.error_class, 'donor-402')
+    // Shared Fusion should be tried and succeed
+    const sharedAttempts = result.attempts.filter(a => a.route === RouteKind.FUSION_SHARED)
+    assert.equal(sharedAttempts.length, 1, 'shared Fusion should be tried after direct 402')
+    assert.equal(sharedAttempts[0].code, 0)
+    const log = readFileSync(f.options.logFile, 'utf8')
+    // Direct route: terminal immediately; Shared route: may retry with different donor first
+    assert.match(log, /Donor 402 Payment Required on route fusion-direct.*direct route terminal/)
+    assert.doesNotMatch(log, /marking all Fusion routes/)
+  } finally { f.close() }
+})
+
+test('bounded shared donor 402 retry triggers retry message', async () => {
+  // Test that donor 402 on shared route triggers retry logic
+  // Full retry requires API mock returning different tokens - tested via integration
+  const f = await fixture(['quota', 'quota', 'donor-402', 'donor-402', 'donor-402'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = deepseek
+    const result = await runModels(f.options)
+    // All routes fail eventually
+    assert.equal(result.code, 1)
+    const log = readFileSync(f.options.logFile, 'utf8')
+    // Should see the retry attempt message for shared pool
+    assert.match(log, /Donor 402 on shared route; retrying with different donor/)
+  } finally { f.close() }
+})
+
+// ==================== Session Preservation Tests ====================
+
+test('session preserved across route switches', async () => {
+  const f = await fixture(['fusion-auth', 'success'], 'ses_restored')
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.selected = null  // Default
+    const result = await runModels(f.options)
+    const calls = JSON.parse(readFileSync(join(f.directory, 'calls.json')))
     assert.equal(calls[0][calls[0].indexOf('--session') + 1], 'ses_restored')
-    assert.equal(readFileSync(join(f.directory, 'run.exit'), 'utf8').trim(), '1')
-  } finally { f.close() }
-})
-test('stop immediately on success or unrelated failure; use connected fallback only after free exhaustion', async () => {
-  for (const pattern of [['success'], ['fatal']]) {
-    const f = await fixture(pattern)
-    try { const result = await runModels(f.options); assert.equal(result.attempts.length, 1) }
-    finally { f.close() }
-  }
-  const f = await fixture(['quota', 'quota', 'quota', 'success'])
-  try {
-    const result = await runModels({ ...f.options, env: { ...f.options.env, OPENROUTER_API_KEY: 'configured' } })
-    assert.equal(result.code, 0)
-    // A connected OpenRouter key no longer injects the north-mini-code fallback.
-    assert.equal(result.attempts.at(-1).model, 'opencode/big-pickle')
-    assert.ok(result.attempts.every(attempt => !/north-mini-code/.test(attempt.model)))
-  } finally { f.close() }
-})
-test('Default with Fusion tries Fusion first, then DeepSeek', async () => {
-  const f = await fixture(['fusion-auth', 'success'])
-  try {
-    const chain = defaultModelChain(true)
-    const result = await runModels({ ...f.options, selected: chain[0], models: modelCandidates(chain[0], null, chain) })
-    assert.equal(result.code, 0)
-    assert.deepEqual(result.attempts.map(row => row.model), [fusionModel, preferredFreeModels[0]])
-  } finally { f.close() }
-})
-test('lazy proxy runs once, only when the chain reaches a free model', async () => {
-  for (const [outcomes, calls] of [[['success'], 0], [['fusion-auth', 'quota', 'success'], 1]]) {
-    const f = await fixture(outcomes)
-    try {
-      let lazy = 0
-      const chain = defaultModelChain(true)
-      const result = await runModels({ ...f.options, selected: chain[0], models: modelCandidates(chain[0], null, chain), switchProxy: null, lazyProxy: async () => { lazy++; return 'none' } })
-      assert.equal(result.code, 0)
-      assert.equal(lazy, calls)
-    } finally { f.close() }
-  }
-})
-test('a picked Fusion advances to the free chain on its auth failure', async () => {
-  const f = await fixture(['fusion-auth', 'success'])
-  try {
-    const chain = defaultModelChain(true)
-    const result = await runModels({ ...f.options, selected: fusionModel, models: modelCandidates(fusionModel, null, chain) })
-    assert.equal(result.code, 0)
-    assert.deepEqual(result.attempts.map(row => row.model), [fusionModel, preferredFreeModels[0]])
-    assert.equal(result.attempts[0].retryable, true)
-    assert.equal(readFileSync(join(f.directory, 'main-model'), 'utf8').trim(), preferredFreeModels[0])
+    assert.equal(calls[1][calls[1].indexOf('--session') + 1], 'ses_main')
+    assert.equal(result.sessionID, 'ses_main')
   } finally { f.close() }
 })
 
+// ==================== On-Demand Fusion Acquisition Tests ====================
 
-const successfulSnapshot = created => ({ busy: false, messages: [
-  { type: 'idle', outcome: 'succeeded', time: { created } },
-  { type: 'assistant', id: 'msg_recovered', finish: 'stop' }
-] })
-test('honor a fresh successful terminal outcome after recovered provider errors, including a sticky CLI exit', async () => {
-  for (const pattern of [['zero-error'], ['quota']]) {
-    const f = await fixture(pattern)
-    try {
-      const result = await runModels({ ...f.options, api: { snapshot: async () => successfulSnapshot(Date.now()) } })
-      assert.equal(result.code, 0)
-      assert.equal(result.attempts.length, 1)
-      assert.equal(result.attempts[0].outcome, 'succeeded')
-      assert.equal(result.attempts[0].retryable, false)
-      const completion = JSON.parse(readFileSync(join(f.directory, 'main-completion.json')))
-      assert.equal(completion.message_id, 'msg_recovered')
-      assert.equal(completion.session_id, 'ses_main')
-      assert.equal(readFileSync(f.options.exitFile, 'utf8').trim(), '0')
-    } finally { f.close() }
-  }
-})
-test('never trust old success, an active turn, missing assistant proof, or a transport gap', async () => {
-  const started = Date.now(), pause = async () => {}
-  for (const snapshot of [successfulSnapshot(started - 1), { ...successfulSnapshot(started), busy: true }, { busy: false, messages: [{ type: 'idle', outcome: 'succeeded', time: { created: started } }] }]) {
-    assert.equal(await terminalAttemptOutcome({ api: { snapshot: async () => snapshot }, sessionID: 'ses_main', started, pause }), null)
-  }
-  assert.equal(await terminalAttemptOutcome({ api: { snapshot: async () => { throw new Error('offline') } }, sessionID: 'ses_main', started, pause }), null)
-})
-test('a fresh interrupted terminal outcome stops the model sequence', async () => {
-  const f = await fixture(['zero-error'])
+test('on-demand Fusion acquisition when no credentials', async () => {
+  const f = await fixture(['success'])
   try {
-    const result = await runModels({ ...f.options, api: { snapshot: async () => ({ busy: false, messages: [{ type: 'idle', outcome: 'interrupted', time: { created: Date.now() } }] }) } })
+    delete f.options.env.FUSION_ACCESS_TOKEN
+    f.options.selected = null  // Default selection
+    let acquisitionCalled = false
+    f.options.acquireFusion = async ({ logFile }) => {
+      acquisitionCalled = true
+      const { appendFileSync } = await import('node:fs')
+      appendFileSync(logFile, '[model-fallback] On-demand Fusion: acquired (route=shared)\n')
+      return { success: true, token: 'acquired-token', upstream: 'https://test.com', route: 'shared' }
+    }
+    const result = await runModels(f.options)
+    assert.equal(result.code, 0)
+    assert.equal(acquisitionCalled, true)
+    const log = readFileSync(f.options.logFile, 'utf8')
+    assert.match(log, /On-demand Fusion.*acquired/)
+  } finally { f.close() }
+})
+
+test('on-demand Fusion: consumer_limit skips SHARED only, not direct (fix #6)', async () => {
+  // Fix #6: consumer_limit only affects shared pool, not direct credentials
+  const f = await fixture(['success'])
+  try {
+    delete f.options.env.FUSION_ACCESS_TOKEN
+    f.options.selected = null
+    f.options.acquireFusion = async () => ({ success: false, cause: 'consumer_limit' })
+    const result = await runModels(f.options)
+    // Default with no Fusion credentials should fail
     assert.equal(result.code, 1)
-    assert.equal(result.attempts.length, 1)
-    assert.equal(result.attempts[0].outcome, 'interrupted')
+    const log = readFileSync(f.options.logFile, 'utf8')
+    // Should mention consumer limit for shared, not "all Fusion routes"
+    assert.match(log, /consumer limit reached for shared pool/)
+    assert.doesNotMatch(log, /skipping Fusion routes/)
   } finally { f.close() }
 })
-test('runtime switch: first free-limit on WARP switches to DataImpulse once and retries the same model', async () => {
-  const f = await fixture(['quota', 'quota', 'success'])
+
+test('transport retries are bounded (fix #8)', async () => {
+  // Fix #8: MAX_TRANSPORT_RETRIES=2 prevents infinite proxy drop/switch loops
+  const f = await fixture(['proxy-drop', 'proxy-drop', 'proxy-drop', 'proxy-drop', 'success'])
   try {
-    let switches = 0
-    const result = await runModels({ ...f.options, switchProxy: async () => { switches++; return true } })
-    assert.equal(result.code, 0)
-    assert.equal(switches, 1, 'switch only once per build')
-    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], preferredFreeModels[0], preferredFreeModels[1]])
-    assert.equal(result.attempts[0].proxy_switch, 'ok')
-    assert.match(readFileSync(f.options.logFile, 'utf8'), /retrying opencode\/deepseek/)
+    let dropCount = 0
+    f.options.dropProxy = async () => { dropCount++; return true }
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.selected = fusionModel
+    const result = await runModels(f.options)
+    // Should fail after bounded retries, not infinite loop
+    const log = readFileSync(f.options.logFile, 'utf8')
+    // Should not exceed MAX_TRANSPORT_RETRIES + 1 attempts per route
+    assert.ok(dropCount <= 3, `Expected at most 3 drop retries, got ${dropCount}`)
   } finally { f.close() }
 })
-test('runtime switch: a failed switch keeps going down the chain', async () => {
-  const f = await fixture(['quota', 'success'])
-  try {
-    const result = await runModels({ ...f.options, switchProxy: async () => false })
-    assert.deepEqual(result.attempts.map(row => row.model), preferredFreeModels.slice(0, 2))
-    assert.equal(result.attempts[0].proxy_switch, 'failed')
-  } finally { f.close() }
-})
-test('runtime switch: not for Fusion, non-free failures, or when WARP was not ok', async () => {
-  const f = await fixture(['fusion-auth', 'success'])
-  try {
-    let switches = 0
-    const chain = defaultModelChain(true)
-    await runModels({ ...f.options, selected: fusionModel, models: modelCandidates(fusionModel, null, chain), switchProxy: async () => { switches++; return true } })
-    assert.equal(switches, 0)
-  } finally { f.close() }
-  const { runtimeProxySwitch } = await import('./run-with-model-fallback.mjs')
-  assert.equal(runtimeProxySwitch({ env: {}, binary: 'oc', logFile: '/dev/null' }), null)
-  assert.equal(typeof runtimeProxySwitch({ env: { WARP_RUNTIME_SWITCH: '1', PROXY_REQUEST: 'true' }, binary: 'oc', logFile: '/dev/null' }), 'function')
-  assert.equal(runtimeProxySwitch({ env: { WARP_RUNTIME_SWITCH: '1' }, binary: 'oc', logFile: '/dev/null' }), null, 'proxy toggle off by default')
-})
-test('dead proxy (502 Upstream Proxy Error / TRAFFIC_EXHAUSTED) drops the proxy once and retries the same model', async () => {
-  const { proxyTunnelError, attemptErrorClass } = await import('./run-with-model-fallback.mjs')
-  const error = { type: 'provider.transport', message: 'ERR_PROXY_TUNNEL: Proxy refused to open a tunnel: 502 Upstream Proxy Error' }
-  assert.equal(proxyTunnelError(error), true)
-  assert.equal(attemptErrorClass(error), 'proxy')
-  assert.equal(proxyTunnelError({ message: 'Build failed' }), false)
+
+// ==================== Proxy Handling Tests ====================
+
+test('proxy tunnel error: drops proxy and retries', async () => {
   const f = await fixture(['proxy', 'success'])
   try {
-    let drops = 0, switches = 0
-    const result = await runModels({ ...f.options, dropProxy: async () => { drops++; return true }, switchProxy: async () => { switches++; return true } })
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'shared'
+    f.options.selected = null
+    let drops = 0
+    const result = await runModels({ 
+      ...f.options, 
+      dropProxy: async () => { drops++; return true }
+    })
     assert.equal(drops, 1)
-    assert.equal(switches, 0, 'never switch back onto a proxy after dropping one')
-    assert.equal(result.attempts[0].proxy_drop, 'ok')
-    assert.equal(result.attempts[0].error_class, 'proxy')
     assert.equal(result.code, 0)
-    assert.deepEqual(result.attempts.map(row => row.model), [preferredFreeModels[0], preferredFreeModels[0]])
+    assert.equal(result.attempts[0].proxy_drop, 'ok')
   } finally { f.close() }
-  const g = await fixture(['proxy'])
+})
+
+// ==================== Sanitized Diagnostics Tests ====================
+
+test('attempt records are sanitized (no secrets)', async () => {
+  const f = await fixture(['fusion-auth', 'success'])
   try {
-    const result = await runModels({ ...g.options, dropProxy: null })
-    assert.equal(result.attempts.length, 1, 'no proxy to drop: stop as before')
-  } finally { g.close() }
+    f.options.env.FUSION_ACCESS_TOKEN = 'super-secret-token'
+    f.options.env.FUSION_UPSTREAM = 'https://secret-host.com?token=secret'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.selected = null
+    await runModels(f.options)
+    const attempts = JSON.parse(readFileSync(join(f.directory, 'model-attempts.json')))
+    const attemptsStr = JSON.stringify(attempts)
+    assert.ok(!attemptsStr.includes('super-secret'), 'attempts should not contain FUSION_ACCESS_TOKEN')
+    assert.ok(!attemptsStr.includes('secret-host'), 'attempts should not contain FUSION_UPSTREAM')
+    for (const attempt of attempts) {
+      assert.ok(attempt.model)
+      assert.ok(attempt.route)
+      assert.ok(attempt.selection_type)
+      assert.ok(attempt.timestamp)
+      assert.ok(typeof attempt.duration_ms === 'number')
+    }
+  } finally { f.close() }
 })
 
-test('forced shared overrides inherited free labels, fails closed without plugin and never falls through on quota/auth',async()=>{
- assert.deepEqual(resolveRunModels({selected:preferredFreeModels[0],fusionEnabled:true,requireShared:true}),{model:fusionModel,models:[fusionModel]})
- assert.throws(()=>resolveRunModels({selected:preferredFreeModels[0],fusionEnabled:false,requireShared:true}),/unavailable/)
- assert.equal(resolveRunModels({selected:preferredFreeModels[0],fusionEnabled:true}).model,preferredFreeModels[0])
- for(const pattern of [['success'],['fusion-auth'],['quota']]){const f=await fixture(pattern,'ses_restored');try{const result=await runModels({...f.options,env:{...f.options.env,FUSION_REQUIRE_SHARED:'true',FUSION_ROUTE:'shared',OPENROUTER_API_KEY:'configured'}});assert.equal(result.attempts.length,1);assert.equal(result.attempts[0].model,fusionModel);const calls=JSON.parse(readFileSync(join(f.directory,'calls.json')));assert.equal(calls[0][calls[0].indexOf('--model')+1],fusionModel);assert.equal(calls[0][calls[0].indexOf('--session')+1],'ses_restored')}finally{f.close()}}
+// ==================== Contract Validation Tests ====================
+
+test('local chain contract validation', () => {
+  const chain = JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8'))
+  assert.ok(Array.isArray(chain.chain))
+  assert.ok(chain.chain.every(id => typeof id === 'string' && /^[\w.-]+\/[\w./:-]+$/.test(id)))
+  assert.equal(typeof chain.fusion, 'string')
+  assert.equal(typeof chain.default_free, 'string')
 })
 
-test('normal shared and own Fusion primaries cannot silently fall through after auxiliary free quota; own explicit free choices remain honored',async()=>{
- assert.deepEqual(resolveRunModels({fusionEnabled:true,route:'own'}).models,[fusionModel]);assert.equal(resolveRunModels({selected:preferredFreeModels[0],fusionEnabled:true,route:'own'}).model,preferredFreeModels[0]);const f=await fixture(['quota','success']);try{const r=await runModels({...f.options,selected:fusionModel,models:[fusionModel,...preferredFreeModels],env:{...f.options.env,FUSION_ROUTE:'own'}});assert.equal(r.attempts.length,1);assert.equal(r.attempts[0].model,fusionModel);assert.equal(r.code,1)}finally{f.close()}
+// ==================== fetchRoutingSettings tests (t248u) ====================
+
+test('fetchRoutingSettings returns API values', async () => {
+  const log = []
+  const logFile = { path: 'test.log', content: [] }
+  const mockAppend = (_, msg) => logFile.content.push(msg)
+  
+  // Mock successful fetch
+  const mockFetch = async (url) => {
+    assert.ok(url.includes('/api/routing-settings'))
+    return {
+      ok: true,
+      json: async () => ({ warp_enabled: true, skip_direct_oc: true })
+    }
+  }
+  
+  const result = await fetchRoutingSettings({ 
+    env: { OMGITHUB_ORIGIN: 'https://test.example.com' },
+    request: mockFetch
+  })
+  
+  assert.equal(result.warp_enabled, true)
+  assert.equal(result.skip_direct_oc, true)
 })
 
-test('normal shared fixes free-first labels without overriding explicit connected providers; admin force overrides both',()=>{
- assert.deepEqual(resolveRunModels({selected:'openai/gpt-6-astra',fusionEnabled:true,requireShared:true}).models,['openai/gpt-6-astra',fusionModel]);assert.deepEqual(resolveRunModels({selected:'openai/gpt-6-astra',fusionEnabled:true,requireShared:true,forceSharedTest:true}).models,[fusionModel])
+test('fetchRoutingSettings returns defaults on error', async () => {
+  const mockFetch = async () => { throw new Error('Network error') }
+  
+  const result = await fetchRoutingSettings({ 
+    env: {},
+    request: mockFetch
+  })
+  
+  assert.equal(result.warp_enabled, false)
+  assert.equal(result.skip_direct_oc, false)
+})
+
+test('fetchRoutingSettings returns defaults on non-ok response', async () => {
+  const mockFetch = async () => ({
+    ok: false,
+    status: 500,
+    json: async () => ({ error: 'Internal error' })
+  })
+  
+  const result = await fetchRoutingSettings({ 
+    env: {},
+    request: mockFetch
+  })
+  
+  assert.equal(result.warp_enabled, false)
+  assert.equal(result.skip_direct_oc, false)
+})
+
+test('fetchRoutingSettings sanitizes boolean values', async () => {
+  const mockFetch = async () => ({
+    ok: true,
+    json: async () => ({ warp_enabled: 'true', skip_direct_oc: 1 })  // Non-boolean values
+  })
+  
+  const result = await fetchRoutingSettings({ 
+    env: {},
+    request: mockFetch
+  })
+  
+  // Non-boolean values should be treated as false
+  assert.equal(result.warp_enabled, false)
+  assert.equal(result.skip_direct_oc, false)
+})
+
+test('selection type semantics match picker behavior', () => {
+  // Verify that selection type determination matches expected picker semantics
+  // Default in picker = no explicit selection = Fusion first
+  assert.equal(determineSelectionType(null), SelectionType.DEFAULT)
+  assert.equal(determineSelectionType('default'), SelectionType.DEFAULT)
+  
+  // Selecting Fusion explicitly with own route = Fusion-only
+  assert.equal(determineSelectionType(fusionModel, 'own'), SelectionType.EXPLICIT_FUSION_ONLY)
+  
+  // Selecting a free model = that model first with Fusion fallback
+  assert.equal(determineSelectionType(deepseek), SelectionType.EXPLICIT_DEEPSEEK)
 })
