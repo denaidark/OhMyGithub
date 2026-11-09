@@ -113,12 +113,28 @@ jobs:
           cd scripts
           node --test e2e-gateway-integration.test.mjs
       
+      - name: Run REAL pinned serve+plugin E2E test
+        env:
+          OPENCODE_BIN: /home/runner/.opencode/bin/opencode
+          CI: 'true'
+        run: |
+          cd scripts
+          # This test MUST PASS - fail-closed assertions verify:
+          # - Plugin installation from pinned commit 8275beda04bbfaa395c073a6b83f89c93801bca2
+          # - Gateway token JSON format compatibility
+          # - Upstream credential injection
+          # - Terminal event receipt AND upstream auth (not OR)
+          # - opencode run exit code 0
+          node --test pinned-serve-fusion-e2e.test.mjs
+      
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-logs
-          path: /tmp/e2e-gateway-*/logs/
+          path: |
+            /tmp/e2e-gateway-*/logs/
+            /tmp/real-pinned-e2e-*/logs/
           retention-days: 7
       
       - name: Test summary
@@ -128,6 +144,7 @@ jobs:
           echo "- Binary: OpenCode v2.2.5" >> $GITHUB_STEP_SUMMARY
           echo "- Production integration: ✓" >> $GITHUB_STEP_SUMMARY
           echo "- E2E gateway: ✓" >> $GITHUB_STEP_SUMMARY
+          echo "- Pinned serve+plugin E2E: ✓" >> $GITHUB_STEP_SUMMARY
 
   all-tests:
     name: All Tests Pass
