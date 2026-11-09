@@ -519,16 +519,8 @@ export function appendBackupModel(candidates, env = process.env) {
   return [...queue, backup, ...fusion]
 }
 
-export function runtimeProxySwitch({ env = process.env, binary, logFile }) {
-  if (env.WARP_RUNTIME_SWITCH !== '1' || env.PROXY_REQUEST !== 'true') return null
-  const script = join(dirname(fileURLToPath(import.meta.url)), 'runtime-proxy-switch.sh')
-  return () => new Promise(done => {
-    const fd = openSync(logFile, 'a')
-    const child = spawn('bash', [script], { cwd: env.PROJECT_DIR, env: { ...env, OPENCODE_BIN: binary }, stdio: ['ignore', 'ignore', fd] })
-    child.on('error', () => { closeSync(fd); done(false) })
-    child.on('close', status => { closeSync(fd); done(status === 0) })
-  })
-}
+// runtimeProxySwitch removed - DataImpulse/residential proxy removed per t256 authorization.
+// Free model FreeUsageLimit now falls through to ondev.store instead of switching to DataImpulse.
 
 export function lazyProxySetup({ env = process.env, binary, logFile }) {
   if (env.WARP_LAZY !== '1') return null
@@ -537,7 +529,8 @@ export function lazyProxySetup({ env = process.env, binary, logFile }) {
     const fd = openSync(logFile, 'a')
     const child = spawn('bash', [script], { cwd: env.PROJECT_DIR, env: { ...env, OPENCODE_BIN: binary }, stdio: ['ignore', 'ignore', fd] })
     child.on('error', () => { closeSync(fd); done('none') })
-    child.on('close', status => { closeSync(fd); done(status === 0 ? 'warp' : status === 3 ? 'dataimpulse' : 'none') })
+    // exit 0 = warp/device, exit 1 = runner network (DataImpulse removed)
+    child.on('close', status => { closeSync(fd); done(status === 0 ? 'warp' : 'none') })
   })
 }
 
@@ -675,7 +668,7 @@ export async function runModels({
   models = modelCandidates(selected), 
   env = process.env, 
   api = env.OPENCODE_PASSWORD ? createV2Client({ base: `http://127.0.0.1:${port}`, password: env.OPENCODE_PASSWORD }) : null, 
-  switchProxy = runtimeProxySwitch({ env, binary, logFile }), 
+  // switchProxy removed - DataImpulse/residential proxy removed per t256 authorization.
   dropProxy, 
   lazyProxy = lazyProxySetup({ env, binary, logFile }),
   acquireFusion = acquireFusionOnDemand,
@@ -1034,8 +1027,8 @@ export async function runModels({
         appendFileSync(logFile, '[model-fallback] Setting up the WARP proxy for free model.\n')
         const mode = await setup().catch(() => 'none')
         appendFileSync(logFile, `[model-fallback] Lazy proxy: ${mode}.\n`)
-        if (mode === 'warp' && !switchProxy) switchProxy = runtimeProxySwitch({ env: { ...env, WARP_RUNTIME_SWITCH: '1' }, binary, logFile })
-        if (mode === 'dataimpulse') switched = true
+        // DataImpulse runtime switch removed per t256 authorization.
+        // WARP is the only runtime proxy option now.
       } else if (lazyProxy && freeEgressModel(model) && !warpEnabled) {
         lazyProxy = null  // Clear but don't execute - WARP disabled by admin
         appendFileSync(logFile, '[model-fallback] WARP proxy setup skipped (admin disabled).\n')
@@ -1268,29 +1261,8 @@ export async function runModels({
       
       if (code === 0 || interrupted || !retryable) break
       
-      // Runtime proxy switch for free model free-limit
-      // Fix #8: Bound proxy switch retries
-      // GATED by warpEnabled: skip proxy switch if WARP disabled by admin
-      if (!switched && switchProxy && warpEnabled && freeEgressModel(model) && errorClass === 'free-limit') {
-        const retryCount = transportRetries.get(route) || 0
-        if (retryCount < MAX_TRANSPORT_RETRIES) {
-          switched = true
-          appendFileSync(logFile, '[model-fallback] Free usage limit on the WARP exit; switching OpenCode to the DataImpulse proxy.\n')
-          const ok = await switchProxy().catch(() => false)
-          attempts.at(-1).proxy_switch = ok ? 'ok' : 'failed'
-          writeFileSync(join(directory, 'model-attempts.json'), JSON.stringify(attempts))
-          if (ok) { 
-            transportRetries.set(route, retryCount + 1)
-            appendFileSync(logFile, `[model-fallback] DataImpulse proxy ready; retrying ${model} (attempt ${retryCount + 2}/${MAX_TRANSPORT_RETRIES + 1}).\n`)
-            triedRoutes.delete(route)
-            index--
-            continue 
-          }
-          appendFileSync(logFile, '[model-fallback] DataImpulse proxy unavailable; keeping the current network.\n')
-        } else {
-          appendFileSync(logFile, `[model-fallback] Proxy switch retry limit reached for route ${route}.\n`)
-        }
-      }
+      // DataImpulse runtime proxy switch removed per t256 authorization.
+      // Free model FreeUsageLimit now falls through to ondev.store via fallback chain.
       
       if (index < queue.length - 1) appendFileSync(logFile, '[model-fallback] Provider/model unavailable; advancing to the next candidate in the same session.\n')
     }
