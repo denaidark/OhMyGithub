@@ -796,7 +796,30 @@ jobs:
               const r=d!=="on"?"not_run":px==="proxy_ok"&&e.WARP_READY?px:e.WARP_READY?"ok":px||(["429_fallback","setup_failed"].includes(s.result)?s.result:"setup_failed");
               fs.writeFileSync(e.OPENCODE_WEB_DIR+"/warp-status.json",JSON.stringify({decision:d,result:r,...(d==="on"?{attempt:s.attempt,egress_prefix:s.egress_prefix,egress_prefix64:s.egress_prefix64,colo:s.colo,...(px?{warp_result:["429_fallback","setup_failed"].includes(s.result)?s.result:"setup_failed"}:{})}:{})}))' 2>/dev/null || true
           timeout 20 node "$RUNTIME_DIR/scripts/run-record.mjs" starting >/dev/null 2>&1 || true
+          
+          # Start Fusion Gateway BEFORE serve when plugin is available
+          # Gateway proxies plugin requests with credential injection
+          FUSION_GATEWAY_PORT=""
+          if [[ "${plugin_commit:-}" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "Starting Fusion Gateway..."
+            FUSION_SHARED_UPSTREAMS="${FUSION_SHARED_PROXY_HOST:-}" \
+              bash "$RUNTIME_DIR/scripts/start-fusion-gateway.sh" "$OPENCODE_WEB_DIR" \
+              > "$OPENCODE_WEB_DIR/fusion-gateway-start.log" 2>&1 || {
+                echo "::warning title=Fusion Gateway::Gateway startup failed; continuing without gateway"
+                cat "$OPENCODE_WEB_DIR/fusion-gateway-start.log" || true
+              }
+            # Source gateway environment (sets FUSION_UPSTREAM, unsets raw token)
+            if [[ -f "$OPENCODE_WEB_DIR/fusion-gateway.env" ]]; then
+              source "$OPENCODE_WEB_DIR/fusion-gateway.env"
+              FUSION_GATEWAY_PORT="${FUSION_UPSTREAM##*:}"
+              echo "Fusion Gateway ready on port $FUSION_GATEWAY_PORT"
+              # Summary
+              echo "- Fusion Gateway: port $FUSION_GATEWAY_PORT" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          
           # Shared with the runtime DataImpulse switch (scripts/runtime-proxy-switch.sh).
+          # Gateway env (FUSION_UPSTREAM, etc) is now in scope for serve
           OPENCODE_BIN="$OPENCODE_BIN" bash "$RUNTIME_DIR/scripts/start-opencode-serve.sh" "$WARP_PROXY"
           wait_for_http() {
             local url="$1"
