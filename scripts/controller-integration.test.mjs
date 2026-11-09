@@ -182,7 +182,7 @@ describe('Gateway and API Client Tests (no plugin)', { skip: !opencodeAvailable 
     })
     
     // Read generation token from file
-    const genToken1 = readFileSync(tokenFile, 'utf8').trim()
+    const genToken1 = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     // Make request through gateway WITH generation token
     const res1 = await fetch(`http://127.0.0.1:${gatewayPort}/auto`, {
@@ -210,7 +210,7 @@ describe('Gateway and API Client Tests (no plugin)', { skip: !opencodeAvailable 
     })
     
     // Read new generation token
-    const genToken2 = readFileSync(tokenFile, 'utf8').trim()
+    const genToken2 = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     assert.notEqual(genToken1, genToken2, 'Token should rotate on route change')
     
     // Make another request with new token
@@ -246,7 +246,7 @@ describe('Gateway and API Client Tests (no plugin)', { skip: !opencodeAvailable 
     t.after(() => gateway.stop())
     
     // Read generation token (still written even without route)
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     // No route set - should get 503
     const res = await fetch(`http://127.0.0.1:${gatewayPort}/auto`, {
@@ -285,7 +285,7 @@ describe('Gateway and API Client Tests (no plugin)', { skip: !opencodeAvailable 
       expires: Date.now() + 60000
     })
     
-    const token1 = readFileSync(tokenFile, 'utf8').trim()
+    const token1 = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     assert.ok(token1.length > 0)
     
     // Set second route
@@ -295,7 +295,7 @@ describe('Gateway and API Client Tests (no plugin)', { skip: !opencodeAvailable 
       expires: Date.now() + 60000
     })
     
-    const token2 = readFileSync(tokenFile, 'utf8').trim()
+    const token2 = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     assert.ok(token2.length > 0)
     assert.notEqual(token1, token2, 'Token should change on route change')
   })

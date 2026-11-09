@@ -257,7 +257,8 @@ describe('E2E Gateway Integration', { skip: !binaryAvailable }, () => {
     })
     
     // Make request through gateway
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const tokenContent = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(tokenContent).access_token
     fakeUpstream.setResponses([{ status: 200, body: { result: 'ok' } }])
     
     const response = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
@@ -324,7 +325,7 @@ describe('E2E Gateway Integration', { skip: !binaryAvailable }, () => {
     assert.ok(routeResult.success)
     
     // Verify gateway can proxy
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     fakeUpstream.setResponses([{ status: 200, body: {} }])
     
     const response = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
@@ -367,7 +368,7 @@ describe('E2E Gateway Integration', { skip: !binaryAvailable }, () => {
       routeType: 'direct'
     })
     
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     // Direct route succeeds
     fakeUpstream.setResponses([{ status: 200, body: {} }])
@@ -378,7 +379,7 @@ describe('E2E Gateway Integration', { skip: !binaryAvailable }, () => {
     })
     
     // Switch to shared route (different credential)
-    const newGenToken = readFileSync(tokenFile, 'utf8').trim()
+    const newGenToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     await control.setRoute({
       credential: 'shared-donor-cred-999',
       upstream: `http://127.0.0.1:${fakeUpstream.port}`,
@@ -387,7 +388,7 @@ describe('E2E Gateway Integration', { skip: !binaryAvailable }, () => {
     })
     
     // Token rotated on route change
-    const sharedGenToken = readFileSync(tokenFile, 'utf8').trim()
+    const sharedGenToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     assert.notStrictEqual(newGenToken, sharedGenToken, 'Token should rotate on route switch')
     
     // Shared route uses different credential
@@ -431,7 +432,7 @@ describe('E2E Gateway Integration', { skip: !binaryAvailable }, () => {
       routeType: 'direct'
     })
     
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     // Request succeeds before expiry
     fakeUpstream.setResponses([{ status: 200, body: {} }])

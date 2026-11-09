@@ -59,7 +59,14 @@ async function createTestFixture(t, options = {}) {
     upstreamPort,
     upstreamRequests,
     setUpstreamResponse: (status, body) => { upstreamResponse = { status, body } },
-    getGenerationToken: () => readFileSync(tokenFile, 'utf8')
+    getGenerationToken: () => {
+      const content = readFileSync(tokenFile, 'utf8')
+      try {
+        return JSON.parse(content).access_token
+      } catch {
+        return content.trim()
+      }
+    }
   }
 }
 
@@ -249,7 +256,8 @@ test('gateway HTTP: 503 when route expired', async (t) => {
   })
   
   const port = gateway.getPort()
-  const token = readFileSync(join(dir, 'token'), 'utf8')
+  const tokenContent = readFileSync(join(dir, 'token'), 'utf8')
+  const token = JSON.parse(tokenContent).access_token
   
   // Fast forward past expiry
   mockNow += 120000

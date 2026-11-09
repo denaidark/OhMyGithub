@@ -55,7 +55,14 @@ async function createIntegrationFixture(t, options = {}) {
     sharedUpstream,
     tokenFile,
     logs,
-    getGenerationToken: () => readFileSync(tokenFile, 'utf8')
+    getGenerationToken: () => {
+      const content = readFileSync(tokenFile, 'utf8')
+      try {
+        return JSON.parse(content).access_token
+      } catch {
+        return content.trim()
+      }
+    }
   }
 }
 
@@ -279,7 +286,8 @@ test('integration: 503 after route expiry', async (t) => {
     expires: mockNow + 5000
   })
   
-  const token = readFileSync(join(dir, 'token'), 'utf8')
+  const tokenContent = readFileSync(join(dir, 'token'), 'utf8')
+  const token = JSON.parse(tokenContent).access_token
   
   // Fast forward past expiry
   mockNow += 10000

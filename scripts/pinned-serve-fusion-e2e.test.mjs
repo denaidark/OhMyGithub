@@ -169,33 +169,42 @@ class FakeCopilotUpstream {
             return
           }
           
-          // Handle /responses (Copilot API format)
+          // Handle /responses (OpenCode OpenAI Responses format)
+          // Based on OpenCode's test fixtures: HTTP SSE uses `data:` only with `type` in JSON
+          // Event types: response.created, response.output_item.added, response.output_text.delta,
+          // response.output_item.done, response.completed
           if (req.url === '/responses' || req.url === '/v1/responses') {
-            this.log(`/responses: streaming response (Copilot format)`)
+            this.log(`/responses: streaming response (OpenCode Responses format)`)
             res.writeHead(200, {
               'Content-Type': 'text/event-stream',
               'Cache-Control': 'no-cache'
             })
             
             const responseId = `resp_${Date.now()}`
+            const itemId = `msg_${Date.now()}`
+            // OpenCode Responses API format (from OpenCode test fixtures)
+            const item = {
+              type: 'message',
+              id: itemId,
+              role: 'assistant',
+              content: [{ type: 'output_text', text: 'test passed' }]
+            }
             const events = [
-              { type: 'response.created', response: { id: responseId, status: 'in_progress' } },
-              { type: 'response.output_item.added', output_index: 0, item: { type: 'message', role: 'assistant', content: [] } },
-              { type: 'response.content_part.added', item_index: 0, content_index: 0, part: { type: 'text', text: '' } },
-              { type: 'response.content_part.delta', item_index: 0, content_index: 0, delta: { type: 'text_delta', text: 'Hello from fake Copilot!' } },
-              { type: 'response.content_part.done', item_index: 0, content_index: 0, part: { type: 'text', text: 'Hello from fake Copilot!' } },
-              { type: 'response.output_item.done', item_index: 0, item: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'Hello from fake Copilot!' }] } },
-              { type: 'response.completed', response: { id: responseId, status: 'completed' } }
+              { type: 'response.created', response: { id: responseId } },
+              { type: 'response.output_item.added', output_index: 0, item: { ...item, content: [] } },
+              { type: 'response.output_text.delta', item_id: itemId, delta: 'test passed' },
+              { type: 'response.output_item.done', output_index: 0, item },
+              { type: 'response.completed', response: { id: responseId, output: [item] } }
             ]
             
             let i = 0
             const sendNext = () => {
               if (i < events.length) {
+                // OpenCode HTTP SSE: data: only, no event: line
                 res.write(`data: ${JSON.stringify(events[i])}\n\n`)
                 i++
                 setTimeout(sendNext, 10)
               } else {
-                res.write('data: [DONE]\n\n')
                 res.end()
                 this.log(`/responses: streaming complete`)
               }
@@ -707,24 +716,22 @@ describe('REAL Pinned E2E: OpenCode v2.2.5 + Fusion Plugin', { skip: !binaryAvai
     // OpenCode v2 expects model as { providerID, id } object
     const modelRef = { providerID: 'copilot-fusion-direct', id: 'fusion' }
     log(`Setting model to ${JSON.stringify(modelRef)}...`)
-    try {
-      const resp = await fetch(`http://127.0.0.1:${servePort}/api/session/${sessionId}/model`, {
-        method: 'POST',
-        headers: {
-          'Authorization': auth,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ model: modelRef })
-      })
-      if (!resp.ok) {
-        const text = await resp.text()
-        log(`Set model response: ${resp.status} ${text}`)
-      } else {
-        log(`Model set successfully`)
-      }
-    } catch (err) {
-      log(`ERROR setting model: ${err.message}`)
-      // Don't fail - model might already be set
+    let modelSetOk = false
+    const modelResp = await fetch(`http://127.0.0.1:${servePort}/api/session/${sessionId}/model`, {
+      method: 'POST',
+      headers: {
+        'Authorization': auth,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ model: modelRef })
+    })
+    if (!modelResp.ok) {
+      const text = await modelResp.text()
+      log(`Set model FAILED: ${modelResp.status} ${text}`)
+      throw new Error(`setModel failed: ${modelResp.status} ${text}`)
+    } else {
+      modelSetOk = true
+      log(`Model set successfully`)
     }
     
     // === Step 9: Execute prompt via opencode run --server ===
@@ -735,84 +742,108 @@ describe('REAL Pinned E2E: OpenCode v2.2.5 + Fusion Plugin', { skip: !binaryAvai
     log(`Executing via opencode run --server (model=${modelArg})...`)
     
     let terminalReceived = false
-    let runExitCode = -1
+    let runExitCode = null
+    let responseContent = null
+    let runError = null
     
-    try {
-      // Start opencode run and wait for completion (with bounded timeout)
-      const runResult = await new Promise((resolve, reject) => {
-        const runLogLines = []
-        const runLog = join(logsDir, 'opencode-run.log')
-        
-        const runProc = spawn(OPENCODE_BIN, [
-          'run',
-          '--server', `http://127.0.0.1:${servePort}`,
-          '--session', sessionId,
-          '--model', modelArg,
-          '--format', 'json',
-          '--auto',
-          promptText
-        ], {
-          cwd: runDir,
-          env: {
-            ...process.env,
-            HOME: runDir,
-            XDG_CONFIG_HOME: runDir,
-            XDG_DATA_HOME: runDir,
-            XDG_CACHE_HOME: runDir,
-            OPENCODE_PASSWORD: password,
-            FUSION_UPSTREAM: `http://127.0.0.1:${gatewayPort}`,
-            FUSION_TOKEN_FILE: tokenFile
-          },
-          stdio: ['ignore', 'pipe', 'pipe']
-        })
-        
-        const timeout = setTimeout(() => {
-          runProc.kill('SIGTERM')
-          reject(new Error('opencode run timeout (30s)'))
-        }, 30000)
-        
-        runProc.stdout.on('data', c => {
-          const text = c.toString()
-          runLogLines.push(`[stdout] ${text}`)
-          appendFileSync(runLog, `[stdout] ${text}`)
-          
-          // Check for JSON output indicating completion
-          try {
-            const json = JSON.parse(text.trim())
-            if (json.type === 'assistant' || json.type === 'result') {
-              terminalReceived = true
-              log(`Run output (assistant/result): ${text.slice(0, 100)}`)
-            }
-          } catch {}
-        })
-        
-        runProc.stderr.on('data', c => {
-          const text = c.toString()
-          runLogLines.push(`[stderr] ${text}`)
-          appendFileSync(runLog, `[stderr] ${text}`)
-        })
-        
-        runProc.on('close', code => {
-          clearTimeout(timeout)
-          runExitCode = code || 0
-          log(`opencode run exited with code ${code}`)
-          if (runLogLines.length > 0) {
-            log(`Run log excerpt: ${runLogLines.slice(-3).join('').slice(0, 200)}`)
-          }
-          resolve({ code, log: runLogLines })
-        })
-        
-        runProc.on('error', err => {
-          clearTimeout(timeout)
-          reject(err)
-        })
+    // Start opencode run and wait for completion (with bounded timeout)
+    const runResult = await new Promise((resolve, reject) => {
+      const runLogLines = []
+      const runLog = join(logsDir, 'opencode-run.log')
+      
+      const runProc = spawn(OPENCODE_BIN, [
+        'run',
+        '--server', `http://127.0.0.1:${servePort}`,
+        '--session', sessionId,
+        '--model', modelArg,
+        '--format', 'json',
+        '--auto',
+        promptText
+      ], {
+        cwd: runDir,
+        env: {
+          ...process.env,
+          HOME: runDir,
+          XDG_CONFIG_HOME: runDir,
+          XDG_DATA_HOME: runDir,
+          XDG_CACHE_HOME: runDir,
+          OPENCODE_PASSWORD: password,
+          FUSION_UPSTREAM: `http://127.0.0.1:${gatewayPort}`,
+          FUSION_TOKEN_FILE: tokenFile
+        },
+        stdio: ['ignore', 'pipe', 'pipe']
       })
       
-      log(`opencode run completed: code=${runResult.code}`)
+      const timeout = setTimeout(() => {
+        runProc.kill('SIGTERM')
+        reject(new Error('opencode run timeout (30s)'))
+      }, 30000)
       
-    } catch (err) {
-      log(`opencode run error: ${err.message}`)
-    }
+      runProc.stdout.on('data', c => {
+        const text = c.toString()
+        runLogLines.push(`[stdout] ${text}`)
+        appendFileSync(runLog, `[stdout] ${text}`)
+        
+        // Check for JSON output indicating completion
+        // OpenCode CLI JSON output includes various message types
+        try {
+          for (const line of text.split('\n').filter(l => l.trim())) {
+            const json = JSON.parse(line.trim())
+            // Track terminal event types (OpenCode CLI JSON format)
+            // step_finish with reason "stop" indicates successful completion
+            if (json.type === 'step_finish' && json.part?.reason === 'stop') {
+              terminalReceived = true
+              log(`Run output (terminal): step_finish reason=stop`)
+            }
+            // Extract actual content from text events
+            if (json.type === 'text' && json.part?.text) {
+              responseContent = json.part.text
+              log(`Run output (content): ${responseContent}`)
+            }
+            // Legacy terminal types for backward compatibility
+            if (json.type === 'assistant' || json.type === 'result' || 
+                json.type === 'done' || json.type === 'complete') {
+              terminalReceived = true
+              if (json.content) responseContent = json.content
+              if (json.text) responseContent = json.text
+              log(`Run output (terminal): type=${json.type}`)
+            }
+            // Check for errors in the output
+            if (json.type === 'error' || json.error) {
+              runError = json.error || json.message || 'Unknown run error'
+              log(`Run ERROR: ${runError}`)
+            }
+          }
+        } catch {}
+      })
+      
+      runProc.stderr.on('data', c => {
+        const text = c.toString()
+        runLogLines.push(`[stderr] ${text}`)
+        appendFileSync(runLog, `[stderr] ${text}`)
+        // Track stderr errors
+        if (text.includes('error') || text.includes('Error') || text.includes('ERROR')) {
+          log(`Run stderr: ${text.slice(0, 200)}`)
+        }
+      })
+      
+      runProc.on('close', code => {
+        clearTimeout(timeout)
+        runExitCode = code  // Don't mask with || 0
+        log(`opencode run exited with code ${code}`)
+        if (runLogLines.length > 0) {
+          log(`Run log excerpt: ${runLogLines.slice(-3).join('').slice(0, 200)}`)
+        }
+        resolve({ code, log: runLogLines, error: runError })
+      })
+      
+      runProc.on('error', err => {
+        clearTimeout(timeout)
+        reject(err)
+      })
+    })
+    
+    log(`opencode run completed: code=${runResult.code}, error=${runResult.error || 'none'}`)
     
     // === Step 11: Verify fake upstream received request ===
     log(`\n=== Verification ===`)
@@ -823,7 +854,7 @@ describe('REAL Pinned E2E: OpenCode v2.2.5 + Fusion Plugin', { skip: !binaryAvai
       log(`  ${req.method} ${req.url} (auth: ${req.headers.authorization ? 'yes' : 'no'})`)
     }
     
-    // Check for any request with our credential
+    // Check for any request with our credential - MUST have at least one
     const authRequests = upstreamRequests.filter(r => 
       r.headers.authorization?.includes('test-copilot-credential-e2e')
     )
@@ -834,7 +865,11 @@ describe('REAL Pinned E2E: OpenCode v2.2.5 + Fusion Plugin', { skip: !binaryAvai
     log(`OpenCode version: ${binaryVersion}`)
     log(`Plugin commit: ${FUSION_PLUGIN_COMMIT}`)
     log(`Session ID: ${sessionId}`)
+    log(`Model set OK: ${modelSetOk}`)
+    log(`Run exit code: ${runExitCode}`)
+    log(`Run error: ${runError || 'none'}`)
     log(`Terminal event received: ${terminalReceived}`)
+    log(`Response content: ${responseContent ? responseContent.slice(0, 100) : 'none'}`)
     log(`Upstream requests: ${upstreamRequests.length}`)
     log(`Auth requests: ${authRequests.length}`)
     
@@ -846,7 +881,11 @@ describe('REAL Pinned E2E: OpenCode v2.2.5 + Fusion Plugin', { skip: !binaryAvai
       binary_check: binaryVersion,
       fusion_plugin_commit: FUSION_PLUGIN_COMMIT,
       session_id: sessionId,
+      model_set_ok: modelSetOk,
+      run_exit_code: runExitCode,
+      run_error: runError,
       terminal_received: terminalReceived,
+      response_content: responseContent ? responseContent.slice(0, 500) : null,
       upstream_requests: upstreamRequests.length,
       auth_requests: authRequests.length,
       gateway_port: gatewayPort,
@@ -855,12 +894,29 @@ describe('REAL Pinned E2E: OpenCode v2.2.5 + Fusion Plugin', { skip: !binaryAvai
     writeFileSync(join(logsDir, 'receipts.json'), JSON.stringify(receipts, null, 2))
     log(`Receipts written to ${join(logsDir, 'receipts.json')}`)
     
-    // Assertions
-    assert.ok(sessionId, 'Session should be created')
-    assert.ok(upstreamRequests.length > 0 || terminalReceived, 
-      'Either upstream should receive requests OR terminal event should be received')
+    // === FAIL-CLOSED ASSERTIONS ===
+    // Every assertion must pass - no soft OR conditions
     
-    log(`\n=== TEST PASSED ===`)
+    // 1. Session must be created
+    assert.ok(sessionId, 'Session MUST be created')
+    
+    // 2. Model must be set successfully
+    assert.ok(modelSetOk, 'Model MUST be set successfully')
+    
+    // 3. opencode run must exit with code 0
+    assert.strictEqual(runExitCode, 0, `opencode run MUST exit 0, got ${runExitCode}`)
+    
+    // 4. No run errors
+    assert.ok(!runError, `opencode run MUST NOT have errors: ${runError}`)
+    
+    // 5. Upstream MUST receive at least one request with injected credential
+    assert.ok(authRequests.length > 0, 
+      `Upstream MUST receive request with injected credential (got ${authRequests.length})`)
+    
+    // 6. Terminal event MUST be received (proof of completion)
+    assert.ok(terminalReceived, 'Terminal event MUST be received')
+    
+    log(`\n=== TEST PASSED (all fail-closed assertions satisfied) ===`)
   })
 })
 

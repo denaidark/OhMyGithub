@@ -204,7 +204,7 @@ describe('Production Integration Tests', { skip: !binaryAvailable }, () => {
     assert.ok(routeResult.success, 'route should be set')
     
     // Make request through gateway
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     fakeUpstream.setResponses([{ status: 200, body: { result: 'ok' } }])
     
     const response = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
@@ -266,7 +266,7 @@ describe('Production Integration Tests', { skip: !binaryAvailable }, () => {
     })
     
     const { port: gwPort } = await gw.start()
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     const response = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
       method: 'POST',
@@ -294,7 +294,7 @@ describe('Production Integration Tests', { skip: !binaryAvailable }, () => {
     })
     
     const { port: gwPort } = await gw.start()
-    const genToken = readFileSync(tokenFile, 'utf8').trim()
+    const genToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     // Set direct route
     gw.setRoute({
@@ -304,7 +304,7 @@ describe('Production Integration Tests', { skip: !binaryAvailable }, () => {
     })
     
     // Read gen token again (rotated on route change)
-    const directGenToken = readFileSync(tokenFile, 'utf8').trim()
+    const directGenToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     
     fakeUpstream.setResponses([{ status: 200, body: {} }])
     await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
@@ -321,7 +321,7 @@ describe('Production Integration Tests', { skip: !binaryAvailable }, () => {
     })
     
     // Gen token rotated again
-    const sharedGenToken = readFileSync(tokenFile, 'utf8').trim()
+    const sharedGenToken = JSON.parse(readFileSync(tokenFile, 'utf8')).access_token
     assert.notStrictEqual(directGenToken, sharedGenToken, 'token should rotate on route change')
     
     fakeUpstream.setResponses([{ status: 200, body: {} }])
