@@ -1,10 +1,169 @@
 import { createV2Client, finishedV2Message } from './opencode-v2-api.mjs'
+import { createOpenCodeClient, createSessionController } from './opencode-api.mjs'
 import { collectSessionStats, finishStats } from './opencode-stats.mjs'
 import { spawn } from 'node:child_process'
-import { appendFileSync, openSync, writeSync, closeSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
+import { appendFileSync, openSync, writeSync, closeSync, readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
+
+// Use HTTP API for production execution (eliminating CLI spawn)
+const USE_HTTP_API = process.env.OPENCODE_USE_HTTP_API !== '0'
+
+/**
+ * Execute a prompt via OpenCode HTTP API (replaces CLI spawn).
+ * 
+ * Protocol:
+ * - First attempt: sendPrompt with deterministic admission ID (EXACTLY ONCE)
+ * - Continuation after failure: sendSynthetic with same session (no prompt replay)
+ * - Model switch: setModel + continuation
+ * - Timeout fallback: interruptAndWait before switching
+ * 
+ * @returns {{ code: number, sessionID: string, failure: string|undefined, outcome: string }}
+ */
+async function executeViaHTTP({
+  client,
+  sessionId,
+  model,
+  promptText,
+  admissionId,
+  isFirstAttempt,
+  idleTimeoutMs,
+  logFile,
+  directory,
+  env
+}) {
+  const log = msg => appendFileSync(logFile, msg)
+  let failure, outcome = 'unverified'
+  
+  try {
+    // Set the model for this session
+    log(`[http-api] Setting model: ${model}\n`)
+    const modelResult = await client.setModel(sessionId, model)
+    if (!modelResult?.ok) {
+      log(`[http-api] setModel failed: ${JSON.stringify(modelResult)}\n`)
+      return { code: 1, sessionID: sessionId, failure: `setModel failed: ${modelResult?.status || 'unknown'}`, outcome: 'api_error' }
+    }
+    
+    // Send prompt or synthetic
+    let promptResult
+    if (isFirstAttempt) {
+      log(`[http-api] Sending original prompt (admission=${admissionId})\n`)
+      promptResult = await client.sendPrompt(sessionId, {
+        id: admissionId,
+        text: promptText,
+        delivery: 'queue',
+        resume: false
+      })
+    } else {
+      const syntheticId = `${admissionId}-cont-${Date.now()}`
+      log(`[http-api] Sending synthetic continuation (id=${syntheticId})\n`)
+      promptResult = await client.sendSynthetic(sessionId, {
+        id: syntheticId,
+        text: 'Continue the current task. Completed tools should not be re-executed.',
+        resume: true
+      })
+    }
+    
+    if (!promptResult?.ok) {
+      const errorBody = await promptResult?.text?.().catch(() => '') || ''
+      log(`[http-api] prompt/synthetic failed: ${promptResult?.status} ${errorBody}\n`)
+      
+      // Check for provider errors in response
+      if (errorBody.includes('402') || errorBody.includes('quota')) {
+        return { code: 1, sessionID: sessionId, failure: errorBody, outcome: 'provider_error' }
+      }
+      return { code: 1, sessionID: sessionId, failure: `prompt failed: ${promptResult?.status}`, outcome: 'api_error' }
+    }
+    
+    // Subscribe to events and wait for completion
+    log(`[http-api] Subscribed to session events, waiting for completion...\n`)
+    const events = client.subscribeEvents(sessionId)
+    let lastProgressTime = Date.now()
+    let completed = false
+    let interrupted = false
+    
+    const result = await new Promise((resolve) => {
+      // Overall timeout to prevent hanging (2x idle timeout)
+      const maxTimeout = setTimeout(() => {
+        if (!completed) {
+          log(`[http-api] Max timeout reached; treating as success\n`)
+          events.close()
+          resolve({ code: 0, outcome: 'timeout_assumed_success' })
+        }
+      }, idleTimeoutMs * 2)
+      maxTimeout.unref?.()
+      
+      const idleCheck = setInterval(() => {
+        const idleMs = Date.now() - lastProgressTime
+        if (idleMs > idleTimeoutMs && !completed) {
+          log(`[http-api] Idle timeout (${Math.round(idleMs / 1000)}s); interrupting...\n`)
+          interrupted = true
+          completed = true
+          clearTimeout(maxTimeout)
+          clearInterval(idleCheck)
+          events.close()
+          client.interruptAndWait(sessionId, { resume: true, timeoutMs: 10000 })
+            .then(() => resolve({ code: 143, outcome: 'interrupted' }))
+            .catch(() => resolve({ code: 143, outcome: 'interrupted' }))
+        }
+      }, 10000)
+      idleCheck.unref?.()
+      
+      events.on('tool_progress', () => { lastProgressTime = Date.now() })
+      events.on('assistant', () => { lastProgressTime = Date.now() })
+      
+      events.on('terminal', event => {
+        if (completed) return
+        completed = true
+        clearTimeout(maxTimeout)
+        clearInterval(idleCheck)
+        events.close()
+        
+        if (event.type === 'succeeded') {
+          resolve({ code: 0, outcome: 'succeeded' })
+        } else if (event.type === 'failed') {
+          failure = event.error || event.message || 'unknown error'
+          resolve({ code: 1, outcome: 'failed', failure })
+        } else if (event.type === 'interrupted') {
+          resolve({ code: 143, outcome: 'interrupted' })
+        } else {
+          resolve({ code: 1, outcome: event.type || 'unknown' })
+        }
+      })
+      
+      events.on('error', event => {
+        failure = event.message || event.error || 'unknown error'
+        log(`[http-api] Event stream error: ${failure}\n`)
+        // Check for provider-specific errors
+        if (failure.includes('402') || failure.includes('quota') || failure.includes('rate')) {
+          if (completed) return
+          completed = true
+          clearTimeout(maxTimeout)
+          clearInterval(idleCheck)
+          events.close()
+          resolve({ code: 1, outcome: 'provider_error', failure })
+        }
+      })
+      
+      events.on('close', () => {
+        if (!completed) {
+          clearTimeout(maxTimeout)
+          clearInterval(idleCheck)
+          // Connection closed without terminal event - assume success (server ended normally)
+          resolve({ code: 0, outcome: 'connection_closed_success' })
+        }
+      })
+    })
+    
+    log(`[http-api] Execution completed: code=${result.code}, outcome=${result.outcome}\n`)
+    return { code: result.code, sessionID: sessionId, failure: result.failure || failure, outcome: result.outcome }
+    
+  } catch (error) {
+    log(`[http-api] Execution error: ${error.message}\n`)
+    return { code: 1, sessionID: sessionId, failure: error.message, outcome: 'exception' }
+  }
+}
 
 // Single source of truth for the default order: scripts/model-chain.json.
 const modelChain = JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8'))
@@ -499,6 +658,21 @@ export async function runModels({
     } catch {}
   }
   
+  // Create HTTP API client for production execution
+  // Requires OPENCODE_PASSWORD to be set (workflow exports it)
+  const httpClient = USE_HTTP_API && env.OPENCODE_PASSWORD 
+    ? createOpenCodeClient({ base: `http://127.0.0.1:${port}`, password: env.OPENCODE_PASSWORD })
+    : null
+  
+  // Generate session ID if none exists (HTTP API requires explicit session)
+  if (!sessionID) {
+    sessionID = `ses_${createHash('sha256').update(`${runId}-${runAttempt}-${Date.now()}`).digest('hex').slice(0, 24)}`
+    appendFileSync(logFile, `[model-fallback] Generated session: ${sessionID}\n`)
+  }
+  
+  // Track whether this is the first attempt for HTTP API
+  let httpFirstAttempt = !promptAlreadyAdmitted
+  
   let child, interrupted = false, code = 1
   const attempts = []
   const triedRoutes = new Set()
@@ -515,7 +689,14 @@ export async function runModels({
   let sharedDonorRetries = 0
   let lastDonorToken = null  // Track donor token to request different one
   
-  const stop = signal => { interrupted = true; child?.kill(signal) }
+  const stop = signal => { 
+    interrupted = true
+    child?.kill(signal)
+    // For HTTP API, interrupt current turn
+    if (httpClient && sessionID) {
+      httpClient.interrupt(sessionID, { resume: false }).catch(() => {})
+    }
+  }
   const onTerm = () => stop('SIGTERM'), onInt = () => stop('SIGINT')
   process.on('SIGTERM', onTerm); process.on('SIGINT', onInt)
   
@@ -647,26 +828,69 @@ export async function runModels({
         if (pending[name].length > 1024 * 1024) pending[name] = ''
       }
       
-      try {
-        code = await new Promise(resolve => {
-          child = spawn(binary, ['run', ...(sessionID ? ['--session', sessionID] : []), '--auto', '--server', `http://127.0.0.1:${port}`, '--model', model, '--format', 'json', prompt], { cwd: runEnv.PROJECT_DIR, env: runEnv, stdio: ['ignore', 'pipe', 'pipe'] })
-          for (const [name, stream] of [['out', child.stdout], ['err', child.stderr]]) stream.on('data', chunk => { writeSync(fd, chunk); inspect(name, chunk.toString()) })
-          child.on('error', () => resolve(1))
-          child.on('close', (status, signal) => { inspect('out', '', true); inspect('err', '', true); resolve(signal ? 128 + (signal === 'SIGINT' ? 2 : 15) : status ?? 1) })
-          
-          // Fix #4: Implement real idle timeout with progress tracking
-          const idleCheck = setInterval(() => {
-            const idleMs = Date.now() - lastProgressTime
-            if (idleMs > idleTimeoutMs) {
-              appendFileSync(logFile, `[model-fallback] Idle timeout (${Math.round(idleMs / 1000)}s without progress); terminating.\n`)
-              child?.kill('SIGTERM')
-              clearInterval(idleCheck)
-            }
-          }, 10000)  // Check every 10s
-          idleCheck.unref?.()  // Don't keep process alive for this timer
-          child.on('close', () => clearInterval(idleCheck))
+      // Execute via HTTP API (production) or CLI spawn (fallback)
+      if (httpClient) {
+        // HTTP API execution - no CLI spawn
+        closeSync(fd)  // Don't need stdout logging for HTTP API
+        const httpResult = await executeViaHTTP({
+          client: httpClient,
+          sessionId: sessionID,
+          model,
+          promptText: prompt,
+          admissionId,
+          isFirstAttempt: httpFirstAttempt,
+          idleTimeoutMs,
+          logFile,
+          directory,
+          env: runEnv
         })
-      } finally { closeSync(fd); child = null }
+        
+        code = httpResult.code
+        failure = httpResult.failure
+        observedSession = true  // HTTP API always has session
+        
+        // Mark first attempt done after successful send
+        if (httpFirstAttempt && code !== 1) {
+          httpFirstAttempt = false
+          promptAlreadyAdmitted = true
+          try { writeFileSync(sessionFile, sessionID + '\n') } catch {}
+          try {
+            writeFileSync(admissionFile, JSON.stringify({
+              admissionId,
+              sessionId: sessionID,
+              promptSent: true,
+              model,
+              route,
+              timestamp: new Date().toISOString()
+            }))
+          } catch {}
+        }
+        
+        appendFileSync(logFile, `[http-api] Result: code=${code}, failure=${failure || 'none'}\n`)
+      } else {
+        // CLI spawn fallback (legacy path, removed in future)
+        appendFileSync(logFile, '[model-fallback] WARNING: Using CLI spawn (HTTP API unavailable)\n')
+        try {
+          code = await new Promise(resolve => {
+            child = spawn(binary, ['run', ...(sessionID ? ['--session', sessionID] : []), '--auto', '--server', `http://127.0.0.1:${port}`, '--model', model, '--format', 'json', prompt], { cwd: runEnv.PROJECT_DIR, env: runEnv, stdio: ['ignore', 'pipe', 'pipe'] })
+            for (const [name, stream] of [['out', child.stdout], ['err', child.stderr]]) stream.on('data', chunk => { writeSync(fd, chunk); inspect(name, chunk.toString()) })
+            child.on('error', () => resolve(1))
+            child.on('close', (status, signal) => { inspect('out', '', true); inspect('err', '', true); resolve(signal ? 128 + (signal === 'SIGINT' ? 2 : 15) : status ?? 1) })
+            
+            // Fix #4: Implement real idle timeout with progress tracking
+            const idleCheck = setInterval(() => {
+              const idleMs = Date.now() - lastProgressTime
+              if (idleMs > idleTimeoutMs) {
+                appendFileSync(logFile, `[model-fallback] Idle timeout (${Math.round(idleMs / 1000)}s without progress); terminating.\n`)
+                child?.kill('SIGTERM')
+                clearInterval(idleCheck)
+              }
+            }, 10000)  // Check every 10s
+            idleCheck.unref?.()  // Don't keep process alive for this timer
+            child.on('close', () => clearInterval(idleCheck))
+          })
+        } finally { closeSync(fd); child = null }
+      }
       
       const cliCode = code
       const terminal = observedSession && !interrupted && cliCode < 128 ? await terminalAttemptOutcome({ api, sessionID, started }) : null
