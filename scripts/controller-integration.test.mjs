@@ -1,16 +1,22 @@
 /**
- * Controller Integration Tests
+ * Gateway and API Client Tests
  * 
- * Tests the HTTP API-based run controller with:
- * - Pinned OpenCode v2.2.5 binary
- * - Fake Copilot upstream
- * - Gateway route switching
+ * Tests gateway route switching and API client methods with:
+ * - Pinned OpenCode v2.2.5 binary (serve only, no plugin)
+ * - Fake Copilot upstream for gateway proxy testing
  * 
- * Verifies:
- * - Original prompt count = 1 across failover (EXACTLY ONCE)
- * - Same session preserved across model switches
- * - Gateway route actually changes on failover
- * - No next turn until settled (interrupt+wait)
+ * LIMITATIONS (honest):
+ * - plugin: [] = no Fusion plugin loaded (cannot test real plugin execution)
+ * - setModel tests only verify API call succeeds, not model switching behavior
+ * - Session IDs are fake (ses_test*) not from real model interaction
+ * - Prompt tests use in-memory flag + try/catch, not actual model response
+ * 
+ * What IS tested:
+ * - Gateway proxy: routes requests to upstream with credential injection
+ * - Gateway token rotation: clears plugin cache on route change
+ * - Gateway 503: returns fusion_unavailable when no route
+ * - API client: getActiveSession() works with serve
+ * - SessionController: in-memory prompt tracking (not persistence)
  */
 
 import test, { describe, before, after } from 'node:test'
@@ -149,7 +155,7 @@ function createFakeUpstream(t) {
 // Skip tests if OpenCode not available
 const testFn = opencodeAvailable ? test : test.skip
 
-describe('Controller Integration Tests', { skip: !opencodeAvailable }, () => {
+describe('Gateway and API Client Tests (no plugin)', { skip: !opencodeAvailable }, () => {
   
   testFn('gateway: route changes are reflected in upstream requests', async t => {
     const dir = tempDir(t)
@@ -294,7 +300,7 @@ describe('Controller Integration Tests', { skip: !opencodeAvailable }, () => {
     assert.notEqual(token1, token2, 'Token should change on route change')
   })
   
-  testFn('API client: setModel changes model for session', async t => {
+  testFn('API client: getActiveSession works with serve (no plugin)', async t => {
     const dir = tempDir(t)
     const servePort = await getPort()
     const password = 'test-password'
@@ -357,7 +363,7 @@ describe('Controller Integration Tests', { skip: !opencodeAvailable }, () => {
     assert.ok(active && typeof active === 'object')
   })
 
-  testFn('API client: prompt exactly once across model switches', async t => {
+  testFn('SessionController: in-memory prompt flag prevents duplicate (not persistent)', async t => {
     const dir = tempDir(t)
     const servePort = await getPort()
     const password = 'test-password'
@@ -463,7 +469,7 @@ describe('Controller Integration Tests', { skip: !opencodeAvailable }, () => {
     assert.equal(originalPromptCalls, 1, 'Original prompt count unchanged')
   })
 
-  testFn('session controller: preserves session ID across switches', async t => {
+  testFn('SessionController: session ID in memory (not tested across restart)', async t => {
     const dir = tempDir(t)
     const servePort = await getPort()
     const password = 'test-password'
