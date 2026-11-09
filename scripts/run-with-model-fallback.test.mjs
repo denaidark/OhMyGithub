@@ -229,7 +229,7 @@ process.exit(outcome==='success'||outcome==='zero-error'?0:1);
       exitFile: join(directory, 'run.exit'), 
       selected: null,
       models: [fusionModel, deepseek],
-      env: { ...process.env, OPENROUTER_API_KEY: '', PROJECT_DIR: directory, PATTERN: JSON.stringify(pattern), RESUME_SESSION_ID: resume },
+      env: { ...process.env, OPENROUTER_API_KEY: '', PROJECT_DIR: directory, PATTERN: JSON.stringify(pattern), RESUME_SESSION_ID: resume, OPENCODE_USE_HTTP_API: '0' },
       acquireFusion: async () => ({ success: false, cause: 'test_disabled' })
     }, 
     close: () => rmSync(directory, { recursive: true, force: true }) 

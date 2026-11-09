@@ -88,10 +88,17 @@ export function createOpenCodeClient({ base, password, request = fetch, now = Da
   }
   
   // POST /api/session/:id/model - set model for subsequent turns
+  // model: { providerID, id, variant? } object
   async function setModel(sessionId, model) {
+    if (!model || typeof model !== 'object') {
+      throw new Error(`setModel requires model object {providerID, id}, got: ${typeof model}`)
+    }
+    if (!model.providerID || !model.id) {
+      throw new Error(`setModel requires model.providerID and model.id, got: ${JSON.stringify(model)}`)
+    }
     return api(`/api/session/${sessionId}/model`, {
       method: 'POST',
-      body: { model: { providerID: model.providerID, id: model.id, variant: model.variant } }
+      body: { model: { providerID: model.providerID, id: model.id, ...(model.variant && { variant: model.variant }) } }
     })
   }
   

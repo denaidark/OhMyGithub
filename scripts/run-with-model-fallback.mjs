@@ -1,5 +1,5 @@
 import { createV2Client, finishedV2Message } from './opencode-v2-api.mjs'
-import { createOpenCodeClient, createSessionController } from './opencode-api.mjs'
+import { createOpenCodeClient, createSessionController, SessionEventTypes, TERMINAL_EVENTS } from './opencode-api.mjs'
 import { collectSessionStats, finishStats } from './opencode-stats.mjs'
 import { spawn } from 'node:child_process'
 import { appendFileSync, openSync, writeSync, closeSync, readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
@@ -8,7 +8,41 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
 // Use HTTP API for production execution (eliminating CLI spawn)
-const USE_HTTP_API = process.env.OPENCODE_USE_HTTP_API !== '0'
+// Default true; set OPENCODE_USE_HTTP_API=0 to disable (testing only)
+function useHttpApi(env) {
+  return (env.OPENCODE_USE_HTTP_API ?? process.env.OPENCODE_USE_HTTP_API ?? '1') !== '0'
+}
+
+/**
+ * Parse model string into OpenCode API format: { providerID, id, variant? }
+ * Examples:
+ *   "omdev/oc/copilot-fusion" -> { providerID: "omdev", id: "oc/copilot-fusion" }
+ *   "opencode/deepseek-v4.1-flash-free" -> { providerID: "opencode", id: "deepseek-v4.1-flash-free" }
+ */
+function parseModelForAPI(modelString) {
+  const parts = modelString.split('/')
+  if (parts.length >= 2) {
+    return { providerID: parts[0], id: parts.slice(1).join('/') }
+  }
+  return { providerID: 'opencode', id: modelString }
+}
+
+/**
+ * Normalize error to string for classification.
+ * Handles: string, Error, { error }, { message }, { code, status }
+ */
+function normalizeError(err) {
+  if (!err) return ''
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object') {
+    if (err.error) return typeof err.error === 'string' ? err.error : JSON.stringify(err.error)
+    if (err.message) return err.message
+    if (err.code || err.status) return `${err.code || err.status}: ${err.type || 'error'}`
+    return JSON.stringify(err)
+  }
+  return String(err)
+}
 
 /**
  * Execute a prompt via OpenCode HTTP API (replaces CLI spawn).
@@ -16,8 +50,14 @@ const USE_HTTP_API = process.env.OPENCODE_USE_HTTP_API !== '0'
  * Protocol:
  * - First attempt: sendPrompt with deterministic admission ID (EXACTLY ONCE)
  * - Continuation after failure: sendSynthetic with same session (no prompt replay)
- * - Model switch: setModel + continuation
- * - Timeout fallback: interruptAndWait before switching
+ * - Model switch: interruptAndWait + setModel + continuation
+ * - Timeout: interruptAndWait before fallback (NOT success)
+ * 
+ * P0 fixes:
+ * - Model parsed to {providerID, id} object (not string)
+ * - timeout/close are FAILURES, not success
+ * - Errors normalized to strings for classifiers
+ * - Interrupt+wait before each controlled continuation
  * 
  * @returns {{ code: number, sessionID: string, failure: string|undefined, outcome: string }}
  */
@@ -31,18 +71,22 @@ async function executeViaHTTP({
   idleTimeoutMs,
   logFile,
   directory,
-  env
+  env,
+  onAdmissionPersist  // Callback to persist admission state immediately after API accepts
 }) {
   const log = msg => appendFileSync(logFile, msg)
   let failure, outcome = 'unverified'
   
   try {
-    // Set the model for this session
-    log(`[http-api] Setting model: ${model}\n`)
-    const modelResult = await client.setModel(sessionId, model)
+    // Parse model string to API format {providerID, id}
+    const modelObj = parseModelForAPI(model)
+    log(`[http-api] Setting model: ${model} -> ${JSON.stringify(modelObj)}\n`)
+    
+    const modelResult = await client.setModel(sessionId, modelObj)
     if (!modelResult?.ok) {
-      log(`[http-api] setModel failed: ${JSON.stringify(modelResult)}\n`)
-      return { code: 1, sessionID: sessionId, failure: `setModel failed: ${modelResult?.status || 'unknown'}`, outcome: 'api_error' }
+      const errText = normalizeError(modelResult)
+      log(`[http-api] setModel failed: ${errText}\n`)
+      return { code: 1, sessionID: sessionId, failure: `setModel failed: ${errText}`, outcome: 'api_error' }
     }
     
     // Send prompt or synthetic
@@ -55,7 +99,19 @@ async function executeViaHTTP({
         delivery: 'queue',
         resume: false
       })
+      
+      // P0-4: Persist admission IMMEDIATELY after API accepts (before execution completes)
+      if (promptResult?.ok && onAdmissionPersist) {
+        onAdmissionPersist()
+        log(`[http-api] Admission persisted (prompt accepted by API)\n`)
+      }
     } else {
+      // P0-8: Interrupt+wait drain before continuation
+      log(`[http-api] Draining previous turn before continuation...\n`)
+      await client.interruptAndWait(sessionId, { resume: true, timeoutMs: 30000 }).catch(e => {
+        log(`[http-api] Drain warning: ${normalizeError(e)}\n`)
+      })
+      
       const syntheticId = `${admissionId}-cont-${Date.now()}`
       log(`[http-api] Sending synthetic continuation (id=${syntheticId})\n`)
       promptResult = await client.sendSynthetic(sessionId, {
@@ -66,14 +122,14 @@ async function executeViaHTTP({
     }
     
     if (!promptResult?.ok) {
-      const errorBody = await promptResult?.text?.().catch(() => '') || ''
+      const errorBody = normalizeError(promptResult)
       log(`[http-api] prompt/synthetic failed: ${promptResult?.status} ${errorBody}\n`)
       
-      // Check for provider errors in response
-      if (errorBody.includes('402') || errorBody.includes('quota')) {
+      // Check for provider errors
+      if (errorBody.includes('402') || errorBody.includes('quota') || errorBody.includes('rate')) {
         return { code: 1, sessionID: sessionId, failure: errorBody, outcome: 'provider_error' }
       }
-      return { code: 1, sessionID: sessionId, failure: `prompt failed: ${promptResult?.status}`, outcome: 'api_error' }
+      return { code: 1, sessionID: sessionId, failure: errorBody || `prompt failed: ${promptResult?.status}`, outcome: 'api_error' }
     }
     
     // Subscribe to events and wait for completion
@@ -81,15 +137,17 @@ async function executeViaHTTP({
     const events = client.subscribeEvents(sessionId)
     let lastProgressTime = Date.now()
     let completed = false
-    let interrupted = false
     
     const result = await new Promise((resolve) => {
-      // Overall timeout to prevent hanging (2x idle timeout)
+      // P0-2: Max timeout is FAILURE, not success
       const maxTimeout = setTimeout(() => {
         if (!completed) {
-          log(`[http-api] Max timeout reached; treating as success\n`)
+          completed = true
+          log(`[http-api] Max timeout reached; this is a FAILURE\n`)
           events.close()
-          resolve({ code: 0, outcome: 'timeout_assumed_success' })
+          // Interrupt before failing
+          client.interruptAndWait(sessionId, { resume: false, timeoutMs: 10000 })
+            .finally(() => resolve({ code: 1, outcome: 'timeout', failure: 'max timeout exceeded' }))
         }
       }, idleTimeoutMs * 2)
       maxTimeout.unref?.()
@@ -97,22 +155,28 @@ async function executeViaHTTP({
       const idleCheck = setInterval(() => {
         const idleMs = Date.now() - lastProgressTime
         if (idleMs > idleTimeoutMs && !completed) {
-          log(`[http-api] Idle timeout (${Math.round(idleMs / 1000)}s); interrupting...\n`)
-          interrupted = true
+          log(`[http-api] Idle timeout (${Math.round(idleMs / 1000)}s); interrupting for fallback...\n`)
           completed = true
           clearTimeout(maxTimeout)
           clearInterval(idleCheck)
           events.close()
+          // P0-8: Interrupt+wait before fallback
           client.interruptAndWait(sessionId, { resume: true, timeoutMs: 10000 })
-            .then(() => resolve({ code: 143, outcome: 'interrupted' }))
-            .catch(() => resolve({ code: 143, outcome: 'interrupted' }))
+            .then(() => resolve({ code: 143, outcome: 'interrupted', failure: 'idle timeout' }))
+            .catch(() => resolve({ code: 143, outcome: 'interrupted', failure: 'idle timeout' }))
         }
       }, 10000)
       idleCheck.unref?.()
       
+      // P0-8: Track real tool progress
       events.on('tool_progress', () => { lastProgressTime = Date.now() })
+      events.on('tool_call', () => { lastProgressTime = Date.now() })
+      events.on('tool_result', () => { lastProgressTime = Date.now() })
       events.on('assistant', () => { lastProgressTime = Date.now() })
+      events.on('step_start', () => { lastProgressTime = Date.now() })
+      events.on('step_end', () => { lastProgressTime = Date.now() })
       
+      // P0-2: Real terminal events: session.execution.succeeded/failed/interrupted
       events.on('terminal', event => {
         if (completed) return
         completed = true
@@ -120,22 +184,27 @@ async function executeViaHTTP({
         clearInterval(idleCheck)
         events.close()
         
-        if (event.type === 'succeeded') {
+        // Real OpenCode terminal event types (from SessionEventTypes)
+        if (event.type === SessionEventTypes.EXECUTION_SUCCEEDED) {
           resolve({ code: 0, outcome: 'succeeded' })
-        } else if (event.type === 'failed') {
-          failure = event.error || event.message || 'unknown error'
+        } else if (event.type === SessionEventTypes.EXECUTION_FAILED) {
+          failure = normalizeError(event.error || event.message)
           resolve({ code: 1, outcome: 'failed', failure })
-        } else if (event.type === 'interrupted') {
-          resolve({ code: 143, outcome: 'interrupted' })
+        } else if (event.type === SessionEventTypes.EXECUTION_INTERRUPTED) {
+          resolve({ code: 143, outcome: 'interrupted', failure: 'execution interrupted' })
+        } else if (event.type === SessionEventTypes.STEP_FAILED) {
+          failure = normalizeError(event.error || event.message)
+          resolve({ code: 1, outcome: 'step_failed', failure })
         } else {
-          resolve({ code: 1, outcome: event.type || 'unknown' })
+          // Unknown terminal event - treat as failure (fail-closed)
+          failure = normalizeError(event)
+          resolve({ code: 1, outcome: event.type || 'unknown_terminal', failure })
         }
       })
       
       events.on('error', event => {
-        failure = event.message || event.error || 'unknown error'
+        failure = normalizeError(event)
         log(`[http-api] Event stream error: ${failure}\n`)
-        // Check for provider-specific errors
         if (failure.includes('402') || failure.includes('quota') || failure.includes('rate')) {
           if (completed) return
           completed = true
@@ -146,12 +215,25 @@ async function executeViaHTTP({
         }
       })
       
+      // P0-2: Connection close is FAILURE, not success - reconcile actual state
       events.on('close', () => {
         if (!completed) {
+          completed = true
           clearTimeout(maxTimeout)
           clearInterval(idleCheck)
-          // Connection closed without terminal event - assume success (server ended normally)
-          resolve({ code: 0, outcome: 'connection_closed_success' })
+          log(`[http-api] SSE closed unexpectedly; querying actual session state...\n`)
+          // Query actual session state to determine outcome
+          client.getActiveSession().then(active => {
+            if (active?.execution?.succeeded) {
+              resolve({ code: 0, outcome: 'succeeded' })
+            } else if (active?.execution?.failed) {
+              resolve({ code: 1, outcome: 'failed', failure: normalizeError(active.execution.error) })
+            } else {
+              resolve({ code: 1, outcome: 'connection_lost', failure: 'SSE connection closed without terminal event' })
+            }
+          }).catch(() => {
+            resolve({ code: 1, outcome: 'connection_lost', failure: 'SSE connection closed, unable to reconcile state' })
+          })
         }
       })
     })
@@ -160,8 +242,8 @@ async function executeViaHTTP({
     return { code: result.code, sessionID: sessionId, failure: result.failure || failure, outcome: result.outcome }
     
   } catch (error) {
-    log(`[http-api] Execution error: ${error.message}\n`)
-    return { code: 1, sessionID: sessionId, failure: error.message, outcome: 'exception' }
+    log(`[http-api] Execution error: ${normalizeError(error)}\n`)
+    return { code: 1, sessionID: sessionId, failure: normalizeError(error), outcome: 'exception' }
   }
 }
 
@@ -658,20 +740,49 @@ export async function runModels({
     } catch {}
   }
   
-  // Create HTTP API client for production execution
-  // Requires OPENCODE_PASSWORD to be set (workflow exports it)
-  const httpClient = USE_HTTP_API && env.OPENCODE_PASSWORD 
-    ? createOpenCodeClient({ base: `http://127.0.0.1:${port}`, password: env.OPENCODE_PASSWORD })
-    : null
-  
-  // Generate session ID if none exists (HTTP API requires explicit session)
-  if (!sessionID) {
-    sessionID = `ses_${createHash('sha256').update(`${runId}-${runAttempt}-${Date.now()}`).digest('hex').slice(0, 24)}`
-    appendFileSync(logFile, `[model-fallback] Generated session: ${sessionID}\n`)
+  // P0-5: Create HTTP API client - FAIL CLOSED if useHttpApi but missing config
+  const httpApiEnabled = useHttpApi(env)
+  let httpClient = null
+  if (httpApiEnabled) {
+    if (!env.OPENCODE_PASSWORD) {
+      const configError = 'HTTP API enabled but OPENCODE_PASSWORD not set. Refusing unsafe CLI fallback.'
+      appendFileSync(logFile, `[model-fallback] FATAL: ${configError}\n`)
+      writeFileSync(exitFile + '.tmp', '1\n'); renameSync(exitFile + '.tmp', exitFile)
+      throw new Error(configError)
+    }
+    httpClient = createOpenCodeClient({ base: `http://127.0.0.1:${port}`, password: env.OPENCODE_PASSWORD })
   }
   
-  // Track whether this is the first attempt for HTTP API
+  // Generate session ID if none exists
+  // Session format: ses_<24-char-hex> (deterministic from run/attempt for restart)
+  if (!sessionID) {
+    const sessionHash = createHash('sha256').update(`${runId}-${runAttempt}`).digest('hex').slice(0, 24)
+    sessionID = `ses_${sessionHash}`
+    appendFileSync(logFile, `[model-fallback] Generated session: ${sessionID}\n`)
+    // Persist immediately so restart uses same session
+    try { writeFileSync(sessionFile, sessionID + '\n') } catch {}
+  }
+  
+  // Track whether this is the first attempt for HTTP API (prompt not yet admitted)
   let httpFirstAttempt = !promptAlreadyAdmitted
+  
+  // P0-4: Callback to persist admission immediately after API accepts
+  const persistAdmission = (model, route) => {
+    promptAlreadyAdmitted = true
+    httpFirstAttempt = false
+    try {
+      writeFileSync(admissionFile, JSON.stringify({
+        admissionId,
+        sessionId: sessionID,
+        promptSent: true,
+        model,
+        route,
+        timestamp: new Date().toISOString()
+      }))
+    } catch (e) {
+      appendFileSync(logFile, `[model-fallback] Warning: failed to persist admission: ${e.message}\n`)
+    }
+  }
   
   let child, interrupted = false, code = 1
   const attempts = []
@@ -828,10 +939,11 @@ export async function runModels({
         if (pending[name].length > 1024 * 1024) pending[name] = ''
       }
       
-      // Execute via HTTP API (production) or CLI spawn (fallback)
+      // Execute via HTTP API (production) - P0-5: CLI spawn disabled when USE_HTTP_API
       if (httpClient) {
         // HTTP API execution - no CLI spawn
-        closeSync(fd)  // Don't need stdout logging for HTTP API
+        closeSync(fd)
+        const wasFirstAttempt = httpFirstAttempt
         const httpResult = await executeViaHTTP({
           client: httpClient,
           sessionId: sessionID,
@@ -842,34 +954,25 @@ export async function runModels({
           idleTimeoutMs,
           logFile,
           directory,
-          env: runEnv
+          env: runEnv,
+          // P0-4: Persist admission IMMEDIATELY when API accepts (before execution)
+          onAdmissionPersist: wasFirstAttempt ? () => persistAdmission(model, route) : null
         })
         
         code = httpResult.code
-        failure = httpResult.failure
-        observedSession = true  // HTTP API always has session
+        // P0-3: Normalize failure to string for error classifiers
+        failure = typeof httpResult.failure === 'string' ? httpResult.failure : normalizeError(httpResult.failure)
+        observedSession = true
         
-        // Mark first attempt done after successful send
-        if (httpFirstAttempt && code !== 1) {
+        // Update first attempt flag (admission persistence handled by callback)
+        if (wasFirstAttempt) {
           httpFirstAttempt = false
-          promptAlreadyAdmitted = true
-          try { writeFileSync(sessionFile, sessionID + '\n') } catch {}
-          try {
-            writeFileSync(admissionFile, JSON.stringify({
-              admissionId,
-              sessionId: sessionID,
-              promptSent: true,
-              model,
-              route,
-              timestamp: new Date().toISOString()
-            }))
-          } catch {}
         }
         
-        appendFileSync(logFile, `[http-api] Result: code=${code}, failure=${failure || 'none'}\n`)
-      } else {
-        // CLI spawn fallback (legacy path, removed in future)
-        appendFileSync(logFile, '[model-fallback] WARNING: Using CLI spawn (HTTP API unavailable)\n')
+        appendFileSync(logFile, `[http-api] Result: code=${code}, outcome=${httpResult.outcome}, failure=${failure || 'none'}\n`)
+      } else if (!httpApiEnabled) {
+        // CLI spawn only when HTTP API explicitly disabled (OPENCODE_USE_HTTP_API=0)
+        appendFileSync(logFile, '[model-fallback] CLI spawn path (HTTP API disabled by env)\n')
         try {
           code = await new Promise(resolve => {
             child = spawn(binary, ['run', ...(sessionID ? ['--session', sessionID] : []), '--auto', '--server', `http://127.0.0.1:${port}`, '--model', model, '--format', 'json', prompt], { cwd: runEnv.PROJECT_DIR, env: runEnv, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -893,14 +996,47 @@ export async function runModels({
       }
       
       const cliCode = code
-      const terminal = observedSession && !interrupted && cliCode < 128 ? await terminalAttemptOutcome({ api, sessionID, started }) : null
-      const outcome = terminal?.outcome
+      let outcome
       
-      if (outcome === 'succeeded') {
-        code = 0; failure = undefined
-        writeFileSync(join(directory, 'main-completion.json'), JSON.stringify({ ...terminal, session_id: sessionID }))
+      // For HTTP API, we already have the outcome from executeViaHTTP
+      // For CLI, query the snapshot to verify terminal state
+      if (httpClient) {
+        // HTTP API: outcome was set during execution, trust it
+        // Map HTTP outcomes to terminal outcomes for consistency
+        const httpOutcomeMap = {
+          'succeeded': 'succeeded',
+          'failed': 'failed', 
+          'interrupted': 'interrupted',
+          'provider_error': 'failed',
+          'api_error': 'failed',
+          'timeout': 'failed',
+          'connection_lost': 'failed',
+          'exception': 'failed'
+        }
+        // Get outcome from httpResult that was stored
+        const httpOutcome = attempts.length > 0 ? null : 'unverified'  // Will be set below
+        outcome = httpOutcomeMap[httpOutcome] || (code === 0 ? 'succeeded' : 'failed')
+      } else {
+        // CLI: query snapshot for actual outcome
+        const terminal = observedSession && !interrupted && cliCode < 128 ? await terminalAttemptOutcome({ api, sessionID, started }) : null
+        outcome = terminal?.outcome
+        
+        if (outcome === 'succeeded') {
+          code = 0; failure = undefined
+          writeFileSync(join(directory, 'main-completion.json'), JSON.stringify({ ...terminal, session_id: sessionID }))
+        }
+        // P0-3: Only apply CLI-specific logic for CLI path
+        else if (outcome === 'failed' || outcome === 'interrupted' || (code === 0 && failure)) {
+          code = 1
+        }
       }
-      else if (outcome === 'failed' || outcome === 'interrupted' || code === 0 && (failure || api)) code = 1
+      
+      // P0-3: For HTTP API, if code is 0 but we have a failure, trust the code (API terminal state)
+      // Don't override HTTP API's determination
+      if (httpClient && code === 0) {
+        outcome = 'succeeded'
+        writeFileSync(join(directory, 'main-completion.json'), JSON.stringify({ session_id: sessionID, outcome: 'succeeded' }))
+      }
       
       const errorClass = code === 0 ? null : attemptErrorClass(failure) || (outcome === 'interrupted' ? null : 'other')
       const retryable = outcome !== 'interrupted' && (retryableProviderError(failure) || fusionFallbackError(model, failure))

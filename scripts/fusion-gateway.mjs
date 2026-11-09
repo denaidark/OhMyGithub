@@ -38,8 +38,11 @@ const COPILOT_UPSTREAMS = new Set([
 // Dynamically allowed upstreams (for shared pool proxy)
 let allowedSharedUpstreams = new Set()
 
-// Allowed plugin paths
-const ALLOWED_PATHS = new Set(['/auto', '/models', '/responses', '/chat/completions'])
+// Allowed plugin paths (with and without /v1 prefix)
+const ALLOWED_PATHS = new Set([
+  '/auto', '/models', '/responses', '/chat/completions',
+  '/v1/auto', '/v1/models', '/v1/responses', '/v1/chat/completions'
+])
 
 // Headers to strip from incoming requests (gateway controls these)
 // Note: copilot-session-token MUST be forwarded (plugin uses it for sessions)
