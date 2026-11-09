@@ -50,23 +50,18 @@ export function createLeaseClient({
   /**
    * Acquire a direct route lease.
    * Validates that the run's owner has Copilot access.
-   * Direct route: run uses its OWN token, not a pool credential.
    * 
-   * Server response: { success, route: 'direct', scope, expires_in_ms, upstream }
+   * Issue #6: Server returns user's actual Copilot credential - NEVER use GITHUB_TOKEN.
+   * Server response: { success, route: 'direct', scope, credential, expires_in_ms, upstream }
    * 
-   * @param {string} ownToken - The run owner's GitHub token for direct route
    * @returns {{ success: boolean, lease?: { token, upstream, expires, route }, error?: string }}
    */
-  async function acquireDirect(ownToken) {
+  async function acquireDirect() {
     log('[lease-client] Acquiring direct lease...')
     
-    if (!ownToken) {
-      log('[lease-client] Direct lease requires own token')
-      return { success: false, error: 'no_own_token' }
-    }
-    
     try {
-      const response = await request(`${baseUrl}/fusion/lease/direct`, {
+      // Issue #3: URL must match server mount: /api/github/:owner/:repo/issues/:number/api/fusion/lease/direct
+      const response = await request(`${baseUrl}/api/fusion/lease/direct`, {
         method: 'POST',
         headers: {
           'Authorization': auth,
@@ -86,12 +81,12 @@ export function createLeaseClient({
       }
       
       const data = await response.json()
-      // Server returns: { success, route: 'direct', scope, expires_in_ms, upstream }
-      // Direct route uses run's OWN token, not a pool credential
-      if (data.success) {
+      // Issue #6: Server returns credential - never fall back to GITHUB_TOKEN
+      // Server response: { success, route: 'direct', scope, credential, expires_in_ms, upstream }
+      if (data.success && data.credential) {
         activeLease = {
           route: 'direct',
-          token: ownToken,  // Use run's own token
+          token: data.credential,  // User's actual Copilot credential from server
           upstream: data.upstream,
           expires: now() + (data.expires_in_ms || 180000),
           scope: data.scope
@@ -101,8 +96,9 @@ export function createLeaseClient({
         return { success: true, lease: activeLease }
       }
       
-      log(`[lease-client] Direct lease denied: ${data.cause || data.error || 'unknown'}`)
-      return { success: false, error: data.cause || data.error || 'denied' }
+      const cause = data.cause || data.error || (data.success ? 'no_credential' : 'denied')
+      log(`[lease-client] Direct lease denied: ${cause}`)
+      return { success: false, error: cause }
     } catch (error) {
       log(`[lease-client] Direct lease error: ${error.message}`)
       return { success: false, error: 'request_error', message: error.message }
@@ -133,7 +129,8 @@ export function createLeaseClient({
     }
     
     try {
-      const response = await request(`${baseUrl}/fusion/lease/shared`, {
+      // Issue #3: URL must match server mount
+      const response = await request(`${baseUrl}/api/fusion/lease/shared`, {
         method: 'POST',
         headers: {
           'Authorization': auth,
@@ -183,7 +180,7 @@ export function createLeaseClient({
     clearRenewalTimer()
     
     try {
-      const response = await request(`${baseUrl}/fusion/lease`, {
+      const response = await request(`${baseUrl}/api/fusion/lease`, {
         method: 'DELETE',
         headers: {
           'Authorization': auth,
@@ -216,9 +213,9 @@ export function createLeaseClient({
     log(`[lease-client] Renewing ${activeLease.type} lease...`)
     
     try {
-      const endpoint = activeLease.type === 'direct' 
-        ? `${baseUrl}/fusion/lease/direct/renew`
-        : `${baseUrl}/fusion/lease/shared/renew`
+      const endpoint = activeLease.route === 'direct' 
+        ? `${baseUrl}/api/fusion/lease/direct/renew`
+        : `${baseUrl}/api/fusion/lease/shared/renew`
       
       const response = await request(endpoint, {
         method: 'POST',

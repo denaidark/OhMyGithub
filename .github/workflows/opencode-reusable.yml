@@ -808,32 +808,53 @@ jobs:
           # Start Fusion Gateway BEFORE serve when plugin is available
           # Gateway proxies plugin requests with credential injection
           # P0-3: Start gateway even without initial FUSION_ACCESS_TOKEN (for on-demand lease)
+          # Issue #7: Fail-closed for Fusion path when gateway is required
           FUSION_GATEWAY_PORT=""
+          FUSION_GATEWAY_REQUIRED="false"
           if [[ "${plugin_commit:-}" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "Starting Fusion Gateway..."
+            # Gateway is REQUIRED if no initial token (need on-demand lease acquisition)
+            [[ -z "${FUSION_ACCESS_TOKEN:-}" ]] && FUSION_GATEWAY_REQUIRED="true"
+            
+            echo "Starting Fusion Gateway (required=$FUSION_GATEWAY_REQUIRED)..."
             # Pass callback token and origin for on-demand lease acquisition
+            gateway_started="false"
+            # Issue #5: Seed trusted upstream allowlist with OmGithub origin (lease returns this)
+            # Extract host from OMGITHUB_ORIGIN for allowlist; add any additional hosts from FUSION_SHARED_PROXY_HOST
+            omgithub_host="$(echo "${OMGITHUB_ORIGIN:-https://omgithub.com}" | sed -E 's|^https?://||; s|/.*||')"
+            shared_upstreams="${omgithub_host}${FUSION_SHARED_PROXY_HOST:+,${FUSION_SHARED_PROXY_HOST}}"
             OMGITHUB_CALLBACK_TOKEN="${OMGITHUB_CALLBACK_TOKEN:-}" \
               OMGITHUB_ORIGIN="${OMGITHUB_ORIGIN:-https://omgithub.com}" \
               GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}" \
               TRIGGER_ISSUE_NUMBER="${TRIGGER_ISSUE_NUMBER:-}" \
               GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" \
               GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
-              FUSION_SHARED_UPSTREAMS="${FUSION_SHARED_PROXY_HOST:-}" \
+              FUSION_SHARED_UPSTREAMS="$shared_upstreams" \
               bash "$RUNTIME_DIR/scripts/start-fusion-gateway.sh" "$OPENCODE_WEB_DIR" \
-              > "$OPENCODE_WEB_DIR/fusion-gateway-start.log" 2>&1 || {
-                echo "::warning title=Fusion Gateway::Gateway startup failed; continuing without gateway"
-                cat "$OPENCODE_WEB_DIR/fusion-gateway-start.log" || true
-              }
+              > "$OPENCODE_WEB_DIR/fusion-gateway-start.log" 2>&1 && gateway_started="true"
+            
             # Source gateway environment (sets FUSION_UPSTREAM, unsets raw token)
-            if [[ -f "$OPENCODE_WEB_DIR/fusion-gateway.env" ]]; then
+            if [[ "$gateway_started" == "true" && -f "$OPENCODE_WEB_DIR/fusion-gateway.env" ]]; then
               source "$OPENCODE_WEB_DIR/fusion-gateway.env"
               FUSION_GATEWAY_PORT="${FUSION_UPSTREAM##*:}"
               echo "Fusion Gateway ready on port $FUSION_GATEWAY_PORT"
               # Summary
               echo "- Fusion Gateway: port $FUSION_GATEWAY_PORT" >> "$GITHUB_STEP_SUMMARY"
-              # P0-3: Export gateway env for runtime scripts
+              # Export gateway env for runtime scripts (securely - raw token already unset in .env)
               printf 'FUSION_GATEWAY_PORT=%s\n' "$FUSION_GATEWAY_PORT" >> "$GITHUB_ENV"
               printf 'FUSION_CONTROL_SOCKET=%s\n' "${FUSION_CONTROL_SOCKET:-}" >> "$GITHUB_ENV"
+            elif [[ "$FUSION_GATEWAY_REQUIRED" == "true" ]]; then
+              # Issue #7: Fail-closed when gateway is required but failed to start
+              echo "::error title=Fusion Gateway::Gateway startup failed and is required (no initial FUSION_ACCESS_TOKEN)"
+              cat "$OPENCODE_WEB_DIR/fusion-gateway-start.log" 2>/dev/null || true
+              # Don't fail the step - fallback to DeepSeek will handle it
+              # But clear plugin_commit so Fusion models aren't attempted
+              echo "::warning title=Fusion Gateway::Disabling Fusion plugin due to gateway failure"
+              unset plugin_commit
+              printf 'FUSION_PLUGIN_COMMIT=gateway_failed\n' >> "$GITHUB_ENV"
+            else
+              # Gateway failed but not required (have initial token)
+              echo "::warning title=Fusion Gateway::Gateway startup failed; continuing with initial token"
+              cat "$OPENCODE_WEB_DIR/fusion-gateway-start.log" 2>/dev/null || true
             fi
           fi
           

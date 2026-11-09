@@ -783,12 +783,44 @@ export async function runModels({
     }
   }
   
-  // Generate session ID if none exists
-  // Session format: ses_<24-char-hex> (deterministic from run/attempt for restart)
+  // Issue #2: Call actual createSession to get server-assigned ID (not fabricated)
+  // Try to create/adopt session via HTTP API if available
+  if (!sessionID && httpClient) {
+    try {
+      // Generate deterministic ID hint for idempotency
+      const idHint = `ses_${createHash('sha256').update(`${runId}-${runAttempt}`).digest('hex').slice(0, 24)}`
+      appendFileSync(logFile, `[model-fallback] Creating session via API (hint: ${idHint})...\n`)
+      
+      const sessionResult = await httpClient.createSession({ 
+        id: idHint,
+        location: { directory: env.PROJECT_DIR }
+      })
+      
+      if (sessionResult?.ok && sessionResult?.data?.id) {
+        sessionID = sessionResult.data.id
+        appendFileSync(logFile, `[model-fallback] Session created: ${sessionID}\n`)
+      } else if (sessionResult?.status === 409 && sessionResult?.data?.existing) {
+        // Session already exists, adopt it
+        sessionID = sessionResult.data.existing
+        appendFileSync(logFile, `[model-fallback] Session adopted: ${sessionID}\n`)
+      } else {
+        // Fall back to hint if creation fails but API is up
+        sessionID = idHint
+        appendFileSync(logFile, `[model-fallback] Session creation returned ${sessionResult?.status}, using hint: ${sessionID}\n`)
+      }
+      
+      // Persist immediately so restart uses same session
+      try { writeFileSync(sessionFile, sessionID + '\n') } catch {}
+    } catch (e) {
+      appendFileSync(logFile, `[model-fallback] Session creation error: ${e.message}, falling back to generated ID\n`)
+    }
+  }
+  
+  // Fallback: Generate session ID if still none (no HTTP client or API failed)
   if (!sessionID) {
     const sessionHash = createHash('sha256').update(`${runId}-${runAttempt}`).digest('hex').slice(0, 24)
     sessionID = `ses_${sessionHash}`
-    appendFileSync(logFile, `[model-fallback] Generated session: ${sessionID}\n`)
+    appendFileSync(logFile, `[model-fallback] Generated session (fallback): ${sessionID}\n`)
     // Persist immediately so restart uses same session
     try { writeFileSync(sessionFile, sessionID + '\n') } catch {}
   }
@@ -863,20 +895,14 @@ export async function runModels({
         // Direct route: try to acquire via lease API (validates Copilot access)
         if (isDirectRoute) {
           if (leaseClient && gatewayControl) {
-            // User's own token is needed for direct route
-            const ownToken = env.GITHUB_TOKEN || env.GH_TOKEN
-            if (!ownToken) {
-              appendFileSync(logFile, '[model-fallback] Direct Fusion: no own token available.\n')
-              triedRoutes.add(route)
-              continue
-            }
-            
-            const leaseResult = await leaseClient.acquireDirect(ownToken)
+            // Issue #6: Server returns user's actual Copilot credential
+            // NEVER use GITHUB_TOKEN - that's repo access, not Copilot auth
+            const leaseResult = await leaseClient.acquireDirect()
             
             if (leaseResult.success && leaseResult.lease) {
-              // Set gateway route with user's own token
+              // Set gateway route with credential from server (user's actual Copilot token)
               const routeResult = await gatewayControl.setRoute({
-                credential: leaseResult.lease.token,  // User's own token
+                credential: leaseResult.lease.token,  // From server, NOT GITHUB_TOKEN
                 upstream: leaseResult.lease.upstream,
                 expires: leaseResult.lease.expires,
                 routeType: 'direct'
@@ -988,9 +1014,11 @@ export async function runModels({
         }
       }
       
-      // Skip Fusion if no credentials available
-      if (model === fusionModel && !fusionEnv.FUSION_ACCESS_TOKEN) {
-        appendFileSync(logFile, `[model-fallback] Skipping ${model} (no Fusion credentials)\n`)
+      // Issue #1: Skip Fusion if no credentials AND no gateway lease ready
+      // Gateway path sets FUSION_ACCESS_TOKEN='' but fusionAcquired=true
+      // Check both raw token AND gateway acquisition status
+      if (model === fusionModel && !fusionEnv.FUSION_ACCESS_TOKEN && !fusionAcquired) {
+        appendFileSync(logFile, `[model-fallback] Skipping ${model} (no Fusion credentials or gateway lease)\n`)
         triedRoutes.add(route)
         continue
       }
@@ -1082,8 +1110,20 @@ export async function runModels({
         })
         
         code = httpResult.code
-        // P0-3: Normalize failure to string for error classifiers
-        failure = typeof httpResult.failure === 'string' ? httpResult.failure : normalizeError(httpResult.failure)
+        // Issue #4: Keep failure as object for classifiers (retryableProviderError, attemptErrorClass)
+        // Parse string failures into objects with 'message' field
+        if (httpResult.failure) {
+          if (typeof httpResult.failure === 'object') {
+            failure = httpResult.failure
+          } else {
+            // Parse string to extract status code and create object
+            const match = String(httpResult.failure).match(/\b(4\d{2}|5\d{2})\b/)
+            failure = { 
+              message: String(httpResult.failure),
+              status: match ? Number(match[1]) : undefined
+            }
+          }
+        }
         observedSession = true
         // P0-6: Store outcome from httpResult for use in post-execution handling
         lastHttpOutcome = httpResult.outcome
@@ -1093,7 +1133,8 @@ export async function runModels({
           httpFirstAttempt = false
         }
         
-        appendFileSync(logFile, `[http-api] Result: code=${code}, outcome=${httpResult.outcome}, failure=${failure || 'none'}\n`)
+        const failureStr = failure ? (failure.message || normalizeError(failure)) : 'none'
+        appendFileSync(logFile, `[http-api] Result: code=${code}, outcome=${httpResult.outcome}, failure=${failureStr}\n`)
       } else if (!httpApiEnabled) {
         // CLI spawn only when HTTP API explicitly disabled (OPENCODE_USE_HTTP_API=0)
         appendFileSync(logFile, '[model-fallback] CLI spawn path (HTTP API disabled by env)\n')
