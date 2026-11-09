@@ -73,15 +73,18 @@ export function createFusionGateway({
   let port = 0
   
   // Write initial generation token to file
+  // Plugin expects JSON: { tokens: { access_token: "..." } } or { access_token: "..." }
   function writeGenerationToken() {
-    writeFileSync(tokenFile, generationToken, { mode: 0o600 })
+    const tokenJson = JSON.stringify({ access_token: generationToken })
+    writeFileSync(tokenFile, tokenJson, { mode: 0o600 })
     log(`[fusion-gateway] Generation token written to ${tokenFile}`)
   }
   
   // Rotate generation token (clears plugin cache)
   function rotateGenerationToken() {
     generationToken = randomBytes(32).toString('base64url')
-    writeFileSync(tokenFile, generationToken, { mode: 0o600 })
+    const tokenJson = JSON.stringify({ access_token: generationToken })
+    writeFileSync(tokenFile, tokenJson, { mode: 0o600 })
     log(`[fusion-gateway] Generation token rotated`)
   }
   
