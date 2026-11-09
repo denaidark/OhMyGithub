@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { appendFileSync, openSync, writeSync, closeSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 
 // Single source of truth for the default order: scripts/model-chain.json.
 const modelChain = JSON.parse(readFileSync(new URL('./model-chain.json', import.meta.url), 'utf8'))
@@ -315,8 +316,10 @@ export function proxyDrop({ env = process.env, binary, logFile }) {
  * On-demand Fusion acquisition.
  * Called when reaching Fusion routes without a startup lease.
  * Returns: { success: true, token, upstream, route } or { success: false, cause }
+ * 
+ * @param excludeDonor - Token to exclude (for bounded 402 retry with different donor)
  */
-export async function acquireFusionOnDemand({ env = process.env, request = fetch, logFile }) {
+export async function acquireFusionOnDemand({ env = process.env, request = fetch, logFile, excludeDonor = null }) {
   const callbackToken = env.OMGITHUB_CALLBACK_TOKEN
   const repo = env.GITHUB_REPOSITORY
   const issueNumber = env.TRIGGER_ISSUE_NUMBER
@@ -330,18 +333,24 @@ export async function acquireFusionOnDemand({ env = process.env, request = fetch
   }
   
   try {
-    appendFileSync(logFile, '[model-fallback] Attempting on-demand Fusion acquisition...\n')
+    appendFileSync(logFile, `[model-fallback] Attempting on-demand Fusion acquisition${excludeDonor ? ' (excluding previous donor)' : ''}...\n`)
+    const body = { 
+      run: runId, 
+      attempt: Number(runAttempt),
+      use_auth: true
+    }
+    // Request different donor on retry
+    if (excludeDonor) {
+      body.exclude_donor_hash = createHash('sha256').update(excludeDonor).digest('hex').slice(0, 16)
+    }
+    
     const response = await request(`${origin}/api/github/${repo}/issues/${issueNumber}/credentials`, {
       method: 'POST',
       headers: { 
         authorization: `Bearer ${callbackToken}`,
         'content-type': 'application/json'
       },
-      body: JSON.stringify({ 
-        run: runId, 
-        attempt: Number(runAttempt),
-        use_auth: true
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000)
     })
     
@@ -463,7 +472,34 @@ export async function runModels({
     queue = [{ model: selected, route: 'selected-other' }, ...queue]
   }
   
-  let sessionID = env.RESUME_SESSION_ID || '', child, interrupted = false, code = 1
+  // Deterministic session ID: persist/adopt from disk or env
+  // Allows session preservation across restart
+  const sessionFile = join(directory, 'session-id')
+  let sessionID = env.RESUME_SESSION_ID || ''
+  if (!sessionID && existsSync(sessionFile)) {
+    try { sessionID = readFileSync(sessionFile, 'utf8').trim() } catch {}
+  }
+  
+  // Deterministic admission ID based on run/attempt (prevents duplicate prompts)
+  const runId = env.GITHUB_RUN_ID || `local-${Date.now()}`
+  const runAttempt = env.GITHUB_RUN_ATTEMPT || '1'
+  const admissionId = `admission-${runId}-${runAttempt}`
+  const admissionFile = join(directory, 'admission-state.json')
+  
+  // Check if prompt already admitted (idempotent across restart)
+  let promptAlreadyAdmitted = false
+  if (existsSync(admissionFile)) {
+    try {
+      const state = JSON.parse(readFileSync(admissionFile, 'utf8'))
+      if (state.admissionId === admissionId && state.promptSent === true) {
+        promptAlreadyAdmitted = true
+        sessionID = state.sessionId || sessionID
+        appendFileSync(logFile, `[model-fallback] Resuming: admission=${admissionId} session=${sessionID}\n`)
+      }
+    } catch {}
+  }
+  
+  let child, interrupted = false, code = 1
   const attempts = []
   const triedRoutes = new Set()
   let switched = false, dropped = false
@@ -473,6 +509,11 @@ export async function runModels({
   // Fix #8: Bound transport retries to prevent infinite loops
   const MAX_TRANSPORT_RETRIES = 2  // Max retries per route for proxy issues
   const transportRetries = new Map()  // route → retry count
+  
+  // Bounded donor 402 retry for shared pool
+  const MAX_DONOR_RETRIES = 2  // Max different donors to try on 402
+  let sharedDonorRetries = 0
+  let lastDonorToken = null  // Track donor token to request different one
   
   const stop = signal => { interrupted = true; child?.kill(signal) }
   const onTerm = () => stop('SIGTERM'), onInt = () => stop('SIGINT')
@@ -505,14 +546,25 @@ export async function runModels({
         }
         
         // Shared route can attempt on-demand acquisition
-        if (isSharedRoute && !fusionAcquired) {
-          fusionAcquired = true  // Only attempt once per build for shared
-          const acquisition = await acquireFusion({ env: fusionEnv, request: fetch, logFile })
+        // Supports bounded retry with different donor on 402
+        if (isSharedRoute) {
+          const acquisition = await acquireFusion({ 
+            env: fusionEnv, 
+            request: fetch, 
+            logFile,
+            excludeDonor: lastDonorToken  // Request different donor on retry
+          })
           if (acquisition.success) {
             fusionEnv = { ...fusionEnv, FUSION_ACCESS_TOKEN: acquisition.token, FUSION_UPSTREAM: acquisition.upstream, FUSION_ROUTE: acquisition.route }
+            lastDonorToken = acquisition.token  // Track for potential retry
+            fusionAcquired = true
           } else if (acquisition.cause === 'consumer_limit') {
             // consumer_limit only affects shared pool, not direct credentials
             appendFileSync(logFile, '[model-fallback] On-demand Fusion: consumer limit reached for shared pool.\n')
+            triedRoutes.add(RouteKind.FUSION_SHARED)
+            continue
+          } else if (acquisition.cause === 'no_donors') {
+            appendFileSync(logFile, '[model-fallback] On-demand Fusion: no donors available in pool.\n')
             triedRoutes.add(RouteKind.FUSION_SHARED)
             continue
           } else {
@@ -535,13 +587,17 @@ export async function runModels({
       const runEnv = model === fusionModel ? fusionEnv : env
       
       // Lazy proxy setup when leaving Fusion for free models
-      if (lazyProxy && freeEgressModel(model)) {
+      // GATED by warpEnabled (t248u): if WARP disabled, skip all proxy setup
+      if (lazyProxy && freeEgressModel(model) && warpEnabled) {
         const setup = lazyProxy; lazyProxy = null
         appendFileSync(logFile, '[model-fallback] Setting up the WARP proxy for free model.\n')
         const mode = await setup().catch(() => 'none')
         appendFileSync(logFile, `[model-fallback] Lazy proxy: ${mode}.\n`)
         if (mode === 'warp' && !switchProxy) switchProxy = runtimeProxySwitch({ env: { ...env, WARP_RUNTIME_SWITCH: '1' }, binary, logFile })
         if (mode === 'dataimpulse') switched = true
+      } else if (lazyProxy && freeEgressModel(model) && !warpEnabled) {
+        lazyProxy = null  // Clear but don't execute - WARP disabled by admin
+        appendFileSync(logFile, '[model-fallback] WARP proxy setup skipped (admin disabled).\n')
       }
       
       const started = Date.now()
@@ -561,7 +617,26 @@ export async function runModels({
         for (const line of lines) {
           try {
             const row = JSON.parse(line)
-            if (/^ses_[A-Za-z0-9]+$/.test(row.sessionID || '')) { sessionID = row.sessionID; observedSession = true }
+            if (/^ses_[A-Za-z0-9]+$/.test(row.sessionID || '')) { 
+              sessionID = row.sessionID
+              observedSession = true
+              // Persist session ID for potential restart
+              try { writeFileSync(sessionFile, sessionID + '\n') } catch {}
+              // Persist admission state (prompt sent)
+              if (!promptAlreadyAdmitted) {
+                promptAlreadyAdmitted = true
+                try {
+                  writeFileSync(admissionFile, JSON.stringify({
+                    admissionId,
+                    sessionId: sessionID,
+                    promptSent: true,
+                    model,
+                    route,
+                    timestamp: new Date().toISOString()
+                  }))
+                } catch {}
+              }
+            }
             if (row.type === 'error') failure = row.error
             // Track progress: tool calls, assistant output, step events
             if (['tool_call', 'tool_result', 'assistant', 'step_start', 'step_end'].includes(row.type)) {
@@ -627,12 +702,21 @@ export async function runModels({
       
       if (code !== 0 && model === fusionModel && failure) appendFileSync(logFile, fusionFailureLine(failure, env))
       
-      // Fix #5: Donor 402 is terminal for THIS route only, not all Fusion routes.
-      // Direct Fusion failure should not suppress separately eligible shared Fusion.
-      // Route was already marked tried above; just log the terminal status.
+      // Fix #5: Donor 402 handling with bounded retry for shared pool
       if (errorClass === 'donor-402' && model === fusionModel) {
-        appendFileSync(logFile, `[model-fallback] Donor 402 Payment Required on route ${route}; this route is terminal.\n`)
-        // Don't mark other routes - shared may have different donor/capacity
+        if (route === RouteKind.FUSION_SHARED && sharedDonorRetries < MAX_DONOR_RETRIES) {
+          // Bounded retry: try different donor
+          sharedDonorRetries++
+          appendFileSync(logFile, `[model-fallback] Donor 402 on shared route; retrying with different donor (attempt ${sharedDonorRetries}/${MAX_DONOR_RETRIES}).\n`)
+          
+          // Clear fusionAcquired to allow re-acquisition with different donor
+          fusionAcquired = false
+          triedRoutes.delete(route)  // Allow retry of shared route
+          // lastDonorToken is already set, acquireFusion will exclude it
+          continue
+        } else {
+          appendFileSync(logFile, `[model-fallback] Donor 402 Payment Required on route ${route}; ${route === RouteKind.FUSION_SHARED ? 'donor retry limit reached' : 'direct route terminal'}.\n`)
+        }
       }
       
       // Proxy tunnel error handling
@@ -662,7 +746,8 @@ export async function runModels({
       
       // Runtime proxy switch for free model free-limit
       // Fix #8: Bound proxy switch retries
-      if (!switched && switchProxy && freeEgressModel(model) && errorClass === 'free-limit') {
+      // GATED by warpEnabled: skip proxy switch if WARP disabled by admin
+      if (!switched && switchProxy && warpEnabled && freeEgressModel(model) && errorClass === 'free-limit') {
         const retryCount = transportRetries.get(route) || 0
         if (retryCount < MAX_TRANSPORT_RETRIES) {
           switched = true

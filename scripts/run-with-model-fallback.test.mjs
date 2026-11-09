@@ -400,8 +400,27 @@ test('donor 402 is terminal for THIS route only, not all Fusion routes (fix #5)'
     assert.equal(sharedAttempts.length, 1, 'shared Fusion should be tried after direct 402')
     assert.equal(sharedAttempts[0].code, 0)
     const log = readFileSync(f.options.logFile, 'utf8')
-    assert.match(log, /Donor 402.*this route is terminal/)
+    // Direct route: terminal immediately; Shared route: may retry with different donor first
+    assert.match(log, /Donor 402 Payment Required on route fusion-direct.*direct route terminal/)
     assert.doesNotMatch(log, /marking all Fusion routes/)
+  } finally { f.close() }
+})
+
+test('bounded shared donor 402 retry triggers retry message', async () => {
+  // Test that donor 402 on shared route triggers retry logic
+  // Full retry requires API mock returning different tokens - tested via integration
+  const f = await fixture(['quota', 'quota', 'donor-402', 'donor-402', 'donor-402'])
+  try {
+    f.options.env.FUSION_ACCESS_TOKEN = 'test-token'
+    f.options.env.FUSION_ROUTE = 'own'
+    f.options.env.OMG_BACKUP_MODEL = 'omdev/oc/deepseek-v4.1-flash-free'
+    f.options.selected = deepseek
+    const result = await runModels(f.options)
+    // All routes fail eventually
+    assert.equal(result.code, 1)
+    const log = readFileSync(f.options.logFile, 'utf8')
+    // Should see the retry attempt message for shared pool
+    assert.match(log, /Donor 402 on shared route; retrying with different donor/)
   } finally { f.close() }
 })
 

@@ -723,14 +723,25 @@ jobs:
           else
             DEVICE_PROXY=''
           fi
-          # Settings > Enable WARP (on by default) adds the warp label. Default with Fusion
-          # (plugin resolved on this run) skips WARP; any picked model or Default without Fusion uses it.
+          # WARP gating hierarchy (t248u):
+          # 1. Admin setting warp_enabled=false → skip ALL WARP setup/download
+          # 2. Issue label `warp` not present → WARP off for this run
+          # 3. Default selection + Fusion enabled → WARP skipped (lazy setup)
+          # 4. Otherwise → WARP on
           # Still set up WARP/DataImpulse when the phone is up — models.opencode.ai needs that path.
           fusion_on=false
           [[ "${plugin_commit:-}" =~ ^[a-f0-9]{40}$ ]] && fusion_on=true
-          WARP_DECISION="$(node "$RUNTIME_DIR/scripts/warp-decision.mjs" "$WARP_REQUEST" "$fusion_on" "$LABELS_JSON" 2>/dev/null || echo off)"
+          WARP_DECISION="$(node "$RUNTIME_DIR/scripts/warp-decision.mjs" "$WARP_REQUEST" "$fusion_on" "$LABELS_JSON" 2>/dev/null)"
+          warp_exit=$?
+          # Exit code 5 = admin_disabled (skip all WARP setup)
+          if [[ "$warp_exit" == 5 ]]; then
+            WARP_DECISION="admin_disabled"
+          fi
           echo "WARP decision: $WARP_DECISION (requested=$WARP_REQUEST, fusion=$fusion_on)"
-          if [[ "$WARP_DECISION" == 'skip' ]]; then
+          if [[ "$WARP_DECISION" == 'admin_disabled' ]]; then
+            echo "- WARP: disabled by admin setting (no setup/download)" >> "$GITHUB_STEP_SUMMARY"
+            echo "WARP_ADMIN_DISABLED=1" >> "$GITHUB_ENV"
+          elif [[ "$WARP_DECISION" == 'skip' ]]; then
             echo "- WARP: skipped for Default because Fusion runs first (set up lazily before a free model)" >> "$GITHUB_STEP_SUMMARY"
             echo "WARP_LAZY=1" >> "$GITHUB_ENV"
           fi

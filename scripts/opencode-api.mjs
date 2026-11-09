@@ -14,6 +14,7 @@
  */
 
 import { EventEmitter } from 'node:events'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 
 // Session event types (from protocol/src/groups/event.ts)
 export const SessionEventTypes = Object.freeze({
@@ -248,16 +249,54 @@ export function createOpenCodeClient({ base, password, request = fetch, now = Da
 
 /**
  * Session controller - manages a single session with proper turn handling
+ * 
+ * Prompt admission ID: Deterministic ID prevents duplicate prompts across restarts.
+ * The admission ID is derived from (sessionId, buildId) and persisted to disk.
+ * On restart, if the admission file exists with matching ID, prompt is skipped (idempotent).
  */
 export function createSessionController({
   client,
   sessionId,
+  buildId,            // Unique per-build ID (e.g. GITHUB_RUN_ID-GITHUB_RUN_ATTEMPT)
+  admissionFile,      // Path to persist admission state
   idleTimeoutMs = 180000,
   toolTimeoutMs = 300000,
-  now = Date.now
+  now = Date.now,
+  fs = { readFileSync, writeFileSync, existsSync }
 }) {
+  // Derive deterministic admission ID from session + build
+  const admissionId = `${sessionId}-${buildId || now()}`
+  
+  // Check if prompt already admitted (idempotent across restart)
   let promptSent = false
   let currentTurnId = null
+  
+  // Load admission state from disk
+  if (admissionFile && fs.existsSync(admissionFile)) {
+    try {
+      const state = JSON.parse(fs.readFileSync(admissionFile, 'utf8'))
+      if (state.admissionId === admissionId && state.promptSent === true) {
+        promptSent = true
+        currentTurnId = state.turnId
+      }
+    } catch {}
+  }
+  
+  // Persist admission state
+  function persistAdmission() {
+    if (!admissionFile) return
+    try {
+      fs.writeFileSync(admissionFile, JSON.stringify({
+        admissionId,
+        sessionId,
+        buildId,
+        promptSent,
+        turnId: currentTurnId,
+        timestamp: new Date(now()).toISOString()
+      }))
+    } catch {}
+  }
+  
   let lastProgressTime = now()
   let lastToolProgressTime = now()
   let eventSubscription = null
@@ -307,16 +346,21 @@ export function createSessionController({
   }
   
   // Send original prompt (EXACTLY ONCE per build)
+  // Uses deterministic admission ID - idempotent across restart
   async function sendOriginalPrompt(text, { turnId } = {}) {
     if (promptSent) {
       throw new Error('Original prompt already sent. Use sendSynthetic for continuation.')
     }
     
-    currentTurnId = turnId || `turn-${now()}`
+    // Use admission ID as turn ID for deterministic idempotency
+    currentTurnId = turnId || admissionId
     promptSent = true
     terminated = false
     terminationReason = null
     lastProgressTime = now()
+    
+    // Persist BEFORE sending (crash-safe: worst case we skip on restart)
+    persistAdmission()
     
     return client.sendPrompt(sessionId, {
       id: currentTurnId,
